@@ -82,11 +82,11 @@ class Status:
 STATUS = Status()
 
 
-def ask(sentence: str) -> dict[str, float]:
-    """Probability per label for one sentence. Raises on any API problem."""
+def ask(state, questions: dict[str, dict]) -> dict[str, dict]:
+    """Jev's answers, keyed by question id, for any state (a sentence or a JSON object of
+    evidence) and any mix of noul / choice / score questions. Raises on any API problem."""
     url, model, key = route()
-    body = {"model": model, "state": sentence,
-            "questions": {k: {"type": "noul", "instructions": v} for k, v in QUESTIONS.items()}}
+    body = {"model": model, "state": state, "questions": questions}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/Aashisho1o1/ElderShield", "X-Title": "ElderShield"})
@@ -99,8 +99,70 @@ def ask(sentence: str) -> dict[str, float]:
         raise RuntimeError(f"HTTP {e.code}: {detail}") from e
     STATUS.last_ms = round((time.perf_counter() - t0) * 1000)
     STATUS.model = data.get("model")
-    answers = data.get("answers", {})
+    return data.get("answers", {})
+
+
+def ask_sentence(sentence: str) -> dict[str, float]:
+    """Probability per warning-sign label for one sentence."""
+    answers = ask(sentence, {k: {"type": "noul", "instructions": v} for k, v in QUESTIONS.items()})
     return {k: float(answers[k]["noul"]) for k in QUESTIONS if k in answers and "noul" in answers[k]}
+
+
+# --- Layer 2: judging a call against the caller's history -------------------------------------
+# The state is evidence from the journal (counts, labels, amounts: never words). Jev weighs the
+# combination, which single rules can't: a new contact + late calls + growing asks + secrecy.
+
+PATTERNS = {
+    "romance": "A romantic relationship built quickly with a stranger, then excuses not to meet, "
+               "secrecy from family, and requests for money for emergencies, fees, or travel.",
+    "impersonation": "The caller claims to be a bank, government office, or tech support, and asks for "
+                     "remote access, codes, gift cards, or urgent payments.",
+    "investment": "The caller promotes cryptocurrency, a trading platform, or guaranteed returns and "
+                  "steers toward deposits.",
+    "family_emergency": "The caller claims to be a relative in trouble and needs money urgently and quietly.",
+    "none": "Nothing in the evidence suggests a scam; an ordinary relationship or a genuine contact.",
+}
+
+ASSESS_QUESTIONS = {
+    "fraud_likely": {"type": "noul", "instructions":
+                     "Taken together, the evidence about this caller and this call points to financial fraud "
+                     "or manipulation of the listener (an older adult)."},
+    "financial_steering": {"type": "noul", "instructions":
+                           "The caller is steering the relationship toward getting money or financial access "
+                           "from the listener."},
+    "isolation": {"type": "noul", "instructions":
+                  "The caller is cutting the listener off from family or friends, or asking for secrecy."},
+    "escalation": {"type": "score", "instructions": "How the caller's requests for money have developed over time",
+                   "criteria": ["No requests for money", "Requests are occasional or stable",
+                                "Requests are growing or becoming more frequent",
+                                "Requests jumped sharply or follow a payment with a new emergency"]},
+    "pattern": {"type": "choice", "instructions": "Which scam pattern, if any, the evidence best fits",
+                "criteria": PATTERNS},
+}
+
+
+def assess(evidence: dict) -> Optional[dict]:
+    """Jev's judgment of a call in the light of the caller's history. None when off or failing."""
+    if not enabled():
+        return None
+    STATUS.calls += 1
+    try:
+        a = ask(evidence, ASSESS_QUESTIONS)
+        STATUS.last_error = None
+        return {
+            "fraud_likely": round(float(a["fraud_likely"]["noul"]), 2),
+            "financial_steering": round(float(a["financial_steering"]["noul"]), 2),
+            "isolation": round(float(a["isolation"]["noul"]), 2),
+            "escalation": round(float(a["escalation"]["score"]), 2),           # 0..3
+            "pattern": a["pattern"]["choice"],
+            "pattern_confidence": round(float(a["pattern"].get("confidence", 0)), 2),
+            "pattern_probabilities": {k: round(float(v), 2) for k, v in a["pattern"].get("probabilities", {}).items()},
+            "model": STATUS.model, "ms": STATUS.last_ms,
+        }
+    except Exception as e:
+        STATUS.errors += 1
+        STATUS.last_error = str(e)[:160]
+        return None
 
 
 def classify(sentence: str) -> list[tuple[str, float]]:
@@ -109,7 +171,7 @@ def classify(sentence: str) -> list[tuple[str, float]]:
         return []
     STATUS.calls += 1
     try:
-        probs = ask(sentence)
+        probs = ask_sentence(sentence)
         STATUS.last_error = None
     except Exception as e:                    # network, auth, rate limit, malformed: the rules still ran
         STATUS.errors += 1

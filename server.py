@@ -28,7 +28,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+import threading
+from threading import Lock, Thread
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
@@ -59,6 +60,7 @@ REMOTE_ACCESS_MEMORY_S = 24 * 3600               # scammers often disconnect jus
 OVERRIDE_WINDOW_S = 15 * 60                      # how long a "Send anyway" release stays usable
 HISTORY_DAYS = 90                                # how far back the memory looks
 RECENT_ASK_S = 24 * 3600                         # "asked you for money on a call" counts for a day
+ASSESS_EVERY_S = float(os.environ.get("ELDERSHIELD_ASSESS_EVERY_S", "5"))   # Jev re-judges a live call this often
 
 DAY = 86400
 
@@ -237,6 +239,12 @@ class Store:
             CREATE TABLE IF NOT EXISTS payments (
                 action_id TEXT PRIMARY KEY, ts REAL NOT NULL, fingerprint TEXT NOT NULL, action_type TEXT NOT NULL,
                 amount REAL, decision TEXT NOT NULL, score INTEGER NOT NULL, call_id TEXT, released_by TEXT);
+            CREATE TABLE IF NOT EXISTS assessments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, contact_id TEXT NOT NULL, call_id TEXT,
+                fraud_likely REAL NOT NULL, financial_steering REAL NOT NULL, isolation REAL NOT NULL,
+                escalation REAL NOT NULL, pattern TEXT NOT NULL, pattern_confidence REAL NOT NULL,
+                evidence TEXT NOT NULL, model TEXT, ms INTEGER);
+            CREATE INDEX IF NOT EXISTS ix_assess_contact ON assessments(contact_id, ts);
             CREATE TABLE IF NOT EXISTS overrides (
                 token TEXT PRIMARY KEY, action_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
                 decision TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
@@ -328,9 +336,12 @@ class Store:
         """Jev's labels for one sentence. The rules' row for the same label wins; Jev adds only
         what they missed, and raises the live alert for it like any other label."""
         found = [(label, prob, 0) for label, prob in labels]
-        for h in self._record(call, chunk, sentence, found, source="jev"):
+        new = self._record(call, chunk, sentence, found, source="jev")
+        for h in new:
             if h["alert"]:
                 raise_live_alert(self, call, h["label"])
+        if new:
+            ASSESSOR.poke()
 
     def _record(self, call: dict[str, Any], chunk: int, text: str,
                 found: list[tuple[str, float, int]], source: str = "rules") -> list[dict[str, Any]]:
@@ -399,9 +410,31 @@ class Store:
                 return None
             return dict(self.conn.execute("SELECT * FROM overrides WHERE token=?", (token,)).fetchone())
 
+    def add_assessment(self, contact_id: str, call_id: Optional[str], verdict: dict[str, Any], evidence: dict[str, Any]) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO assessments (ts, contact_id, call_id, fraud_likely, financial_steering, isolation, escalation, "
+                "pattern, pattern_confidence, evidence, model, ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (now_ts(), contact_id, call_id, verdict["fraud_likely"], verdict["financial_steering"], verdict["isolation"],
+                 verdict["escalation"], verdict["pattern"], verdict["pattern_confidence"], json.dumps(evidence),
+                 verdict.get("model"), verdict.get("ms")))
+            self.conn.commit()
+
+    def latest_assessment(self, contact_id: str) -> Optional[dict[str, Any]]:
+        row = self.conn.execute("SELECT * FROM assessments WHERE contact_id=? ORDER BY ts DESC LIMIT 1", (contact_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["evidence"] = json.loads(d["evidence"])
+        prev = self.conn.execute("SELECT fraud_likely FROM assessments WHERE contact_id=? AND ts<? ORDER BY ts DESC LIMIT 1",
+                                 (contact_id, row["ts"])).fetchone()
+        d["previous_fraud_likely"] = prev[0] if prev else None
+        d["ago"] = ago(now_ts() - row["ts"])
+        return d
+
     def clear(self) -> None:
         with self._lock:
-            for table in ("contacts", "calls", "signals", "remote_access_seen", "payments", "overrides"):
+            for table in ("contacts", "calls", "signals", "remote_access_seen", "payments", "overrides", "assessments"):
                 self.conn.execute(f"DELETE FROM {table}")
             self.conn.commit()
             self.alert = None
@@ -477,9 +510,15 @@ def contact_track(store: Store, contact: sqlite3.Row, now: float) -> dict[str, A
     if "crypto_investment" in labels:
         flags.append("Talked about crypto or investing")
 
+    verdict = store.latest_assessment(contact["id"])
     return {
+        "jev": ({k: verdict[k] for k in ("fraud_likely", "financial_steering", "isolation", "escalation", "pattern",
+                                          "pattern_confidence", "previous_fraud_likely", "ago", "ms")}
+                | {"pattern_words": PATTERN_WORDS.get(verdict["pattern"], verdict["pattern"])}) if verdict else None,
         "id": contact["id"], "name": name, "days_known": days_known, "stage": stage,
-        "stage_name": STAGES[stage], "risk": "high" if stage >= 4 else "watch" if stage >= 2 else "low",
+        "stage_name": STAGES[stage],
+        "risk": ("high" if stage >= 4 or (verdict and verdict["fraud_likely"] >= 0.7)
+                 else "watch" if stage >= 2 or (verdict and verdict["fraud_likely"] >= 0.4) else "low"),
         "calls": len(calls), "calls_this_week": len(week), "minutes_this_week": round(sum(_minutes(c, now) for c in week)),
         "per_day": [sum(1 for c in calls if now - (d + 1) * DAY <= c["started"] < now - d * DAY) for d in range(20, -1, -1)],
         "flags": flags,
@@ -531,12 +570,126 @@ def memory_for_payment(store: Store) -> tuple[dict[str, int], list[str]]:
         reasons.append(f"{who} {LABEL_WORDS[ask['label']]} on a call {ago(now - ask['ts'])}")
     top = max((contact_track(store, c, now) for c in store.conn.execute("SELECT * FROM contacts").fetchall()),
               key=lambda t: t["stage"], default=None)
+    ladder = 0
     if top and top["stage"] >= 3:
         key = {3: "pattern_isolating", 4: "pattern_asking", 5: "pattern_escalating"}[top["stage"]]
-        comp["long_term_pattern"] = WEIGHTS[key]
+        ladder = WEIGHTS[key]
         reasons.append(f"{top['name']}, someone you've known for {top['days_known']} days, has been "
                        + {3: "isolating you", 4: "asking you for money", 5: "asking for more and more money"}[top["stage"]])
+    # Jev's judgment of the same history (layer 2): it sees the combination the ladder can't.
+    # The ladder stays as the floor, so a Jev outage or a low reading never weakens the rules.
+    judged = max((a for a in (store.latest_assessment(c["id"]) for c in store.conn.execute("SELECT id FROM contacts").fetchall())
+                  if a and now - a["ts"] < HISTORY_DAYS * DAY), key=lambda a: a["fraud_likely"], default=None)
+    jev_points = int(round(WEIGHTS["pattern_escalating"] * judged["fraud_likely"])) if judged and judged["fraud_likely"] >= 0.5 else 0
+    if jev_points:
+        comp["long_term_pattern"] = max(ladder, jev_points)   # the ladder is the floor
+        who = store.conn.execute("SELECT label FROM contacts WHERE id=?", (judged["contact_id"],)).fetchone()[0]
+        if ladder and top and top["name"] == who:            # Jev agrees with the ladder: one reason, Jev's wording
+            reasons.pop()
+        reasons.append(f"the pattern of calls with {who} looks like {PATTERN_WORDS.get(judged['pattern'], judged['pattern'])} "
+                       f"({int(judged['fraud_likely'] * 100)}% sure)")
+    elif ladder:
+        comp["long_term_pattern"] = ladder
     return comp, reasons
+
+
+# --------------------------------------------------------------------------- #
+# Layer 2: Jev judges the live call against the caller's history, every few seconds
+# --------------------------------------------------------------------------- #
+
+
+def evidence_for(store: Store, contact: sqlite3.Row, now: float) -> dict[str, Any]:
+    """What Jev sees: counts, labels and amounts from the journal. Never the words."""
+    since = now - HISTORY_DAYS * DAY
+    calls = store.conn.execute("SELECT * FROM calls WHERE contact_id=? AND started>=? ORDER BY started",
+                               (contact["id"], since)).fetchall()
+    week = [c for c in calls if c["started"] >= now - 7 * DAY]
+    before = [c for c in calls if c["started"] < now - 7 * DAY]
+    avg = lambda cs: round(sum(_minutes(c, now) for c in cs) / len(cs)) if cs else 0
+    sigs = store.conn.execute("SELECT call_id, ts, label, snippet FROM signals WHERE contact_id=? AND ts>=? ORDER BY ts",
+                              (contact["id"], since)).fetchall()
+    amounts = []
+    for sg in sigs:
+        if sg["label"] in ASK_LABELS and sg["snippet"]:
+            for m in re.findall(r"\$\s?(\d[\d,]*)|(\d[\d,]*)\s*(?:dollars|bucks)", sg["snippet"]):
+                amounts.append(int((m[0] or m[1]).replace(",", "")))
+    first_ask = min((sg["ts"] for sg in sigs if sg["label"] in ASK_LABELS), default=None)
+    paid = [r[0] for r in store.conn.execute("SELECT amount FROM payments WHERE decision='ALLOW' AND ts>=?",
+                                             (first_ask,)).fetchall()] if first_ask else []
+    live = store.current_call()
+    by_call: dict[str, list[str]] = {}
+    for sg in sigs:
+        by_call.setdefault(sg["call_id"], []).append(sg["label"])
+    earlier = [{"days_ago": round((now - c["started"]) / DAY, 1), "minutes": round(_minutes(c, now)),
+                "late_night": _late(c["started"]), "heard": by_call.get(c["id"], [])}
+               for c in calls if not live or c["id"] != live["id"]][-12:]
+    usual = store.conn.execute("SELECT COUNT(*) FROM calls WHERE started>=? AND started<?",
+                               (now - 35 * DAY, now - 7 * DAY)).fetchone()[0] / 4
+    return {
+        "listener": "an older adult",
+        "caller": {
+            "known_for_days": max(0, int((now - contact["first_seen"]) // DAY)),
+            "calls_total": len(calls), "calls_this_week": len(week),
+            "avg_minutes_this_week": avg(week), "avg_minutes_before_this_week": avg(before),
+            "late_night_calls_this_week": sum(1 for c in week if _late(c["started"])),
+            "days_with_money_requests": len({int(sg["ts"] // DAY) for sg in sigs if sg["label"] in ASK_LABELS}),
+            "amounts_asked_in_order": amounts,
+            "payments_sent_after_first_request": [p for p in paid if p],
+            "warning_signs_ever": sorted({sg["label"] for sg in sigs}),
+        },
+        "listener_usual": {"calls_per_week_from_everyone": round(usual, 1)},
+        "this_call": ({"minutes_so_far": round(_minutes(live, now)), "heard_so_far": by_call.get(live["id"], []),
+                       "remote_control_running": json.loads(live["remote_access"])}
+                      if live and live["contact_id"] == contact["id"] else None),
+        "earlier_calls": earlier,
+    }
+
+
+class Assessor:
+    """Runs Jev's call-level judgment every ASSESS_EVERY_S while a call is live, at once when a
+    new warning sign lands (poke), and once more when the call ends."""
+
+    def __init__(self, store: Store):
+        self.store = store
+        self._wake = threading.Event()
+        self._last_call: Optional[str] = None
+        Thread(target=self._loop, daemon=True).start()
+
+    def poke(self) -> None:
+        self._wake.set()
+
+    def _loop(self) -> None:
+        while True:
+            self._wake.wait(ASSESS_EVERY_S)
+            self._wake.clear()
+            try:
+                live = self.store.current_call()
+                if live:
+                    self._last_call = live["id"]
+                    self.run(live["contact_id"], live["id"])
+                elif self._last_call:                       # the call just ended: one final judgment
+                    ended = self.store.conn.execute("SELECT contact_id FROM calls WHERE id=?", (self._last_call,)).fetchone()
+                    self._last_call = None
+                    if ended:
+                        self.run(ended["contact_id"], None)
+            except Exception as e:                          # never let the loop die
+                jev.STATUS.last_error = f"assessor: {e}"[:160]
+
+    def run(self, contact_id: str, call_id: Optional[str]) -> Optional[dict[str, Any]]:
+        if not jev.enabled():
+            return None
+        contact = self.store.conn.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
+        if not contact:
+            return None
+        evidence = evidence_for(self.store, contact, now_ts())
+        verdict = jev.assess(evidence)
+        if verdict:
+            self.store.add_assessment(contact_id, call_id, verdict, evidence)
+        return verdict
+
+
+PATTERN_WORDS = {"romance": "a romance scam", "impersonation": "a bank or tech-support impersonation scam",
+                 "investment": "an investment scam", "family_emergency": "a family-emergency scam", "none": "no known scam"}
 
 
 # --------------------------------------------------------------------------- #
@@ -595,6 +748,7 @@ async def local_ui_only(request: Request, call_next):
 
 
 STORE = Store()
+ASSESSOR = Assessor(STORE)
 
 
 class ActionIn(BaseModel):
@@ -733,7 +887,20 @@ def call_transcript(t: TranscriptIn) -> dict[str, Any]:
     for h in heard:
         if h["alert"] and call:
             raise_live_alert(STORE, call, h["label"])
+    if heard:
+        ASSESSOR.poke()
     return {"heard": [{k: h[k] for k in ("label", "confidence", "snippet", "source")} for h in heard]}
+
+
+@app.post("/assess")
+def assess_now() -> dict[str, Any]:
+    """Jev judges every known caller against their history right now (the demo's 'Load 3-week
+    story' calls this, so the cards fill in without waiting for a call)."""
+    out = {}
+    for c in STORE.conn.execute("SELECT id, label FROM contacts").fetchall():
+        v = ASSESSOR.run(c["id"], None)
+        out[c["label"]] = v and {"fraud_likely": v["fraud_likely"], "pattern": v["pattern"]}
+    return {"assessed": out, "jev": jev.STATUS.snapshot()}
 
 
 @app.get("/state")

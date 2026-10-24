@@ -99,6 +99,13 @@
   .c-head{display:flex;gap:6px;align-items:baseline;font-size:12.5px;flex-wrap:wrap}
   .snip{font-size:12.5px;color:var(--sub);font-style:italic;margin-top:4px}
   .you{font-size:12.5px;color:var(--warn);margin-bottom:8px}
+  .verdict-box{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+  .v-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px}
+  .bars{margin-top:8px;display:grid;gap:4px}
+  .bar-row{display:grid;grid-template-columns:120px 1fr 36px;gap:8px;align-items:center;font-size:11px;color:var(--label)}
+  .bar-row i{display:block;height:4px;border-radius:2px;background:rgba(255,255,255,.08)} .bar-row b{display:block;height:100%;border-radius:2px;background:var(--warn)}
+  .high .bar-row b{background:var(--bad)}
+  .bar-row span:last-child{text-align:right}
   .hint{font-size:12px;color:var(--label);margin:20px 0 0;border-top:1px solid var(--line);padding-top:12px}
 
   /* What a screen-sharing caller sees: a plain, believable stall */
@@ -351,6 +358,17 @@ function personCard(c){
       <div class="ladder-names">${STAGE_SHORT.slice(1).map(s=>`<span>${s}</span>`).join('')}</div>`:''}
     <div class="spark" title="calls per day, last 3 weeks">${c.per_day.map(n=>`<i style="height:${Math.round(n/max*100)}%"></i>`).join('')}</div>
     ${c.flags.length?`<ul class="flags">${c.flags.map(f=>`<li>${esc(f)}</li>`).join('')}</ul>`:''}
+    ${c.jev?jevVerdict(c.jev):''}
+  </div>`;
+}
+/* Layer 2: Jev's judgment of this caller's whole history, refreshed every few seconds during a call. */
+function jevVerdict(j){
+  const pct=x=>Math.round(x*100), delta=j.previous_fraud_likely==null?'':(j.fraud_likely>j.previous_fraud_likely+0.04?' ↑':j.fraud_likely<j.previous_fraud_likely-0.04?' ↓':'');
+  const cls=j.fraud_likely>=0.7?'bad':j.fraud_likely>=0.4?'warn':'good';
+  return `<div class="verdict-box">
+    <div class="v-head"><span class="chip ${cls}">Jev: ${pct(j.fraud_likely)}% fraud${delta}</span>
+      <span class="muted">${esc(j.pattern_words)}${j.pattern!=='none'?' · '+pct(j.pattern_confidence)+'% sure':''} · ${esc(j.ago)} · ${j.ms} ms</span></div>
+    <div class="bars">${[['steering toward money',j.financial_steering],['isolating her',j.isolation],['asks escalating',j.escalation/3]].map(([n,v])=>`<div class="bar-row"><span>${n}</span><i><b style="width:${pct(v)}%"></b></i><span>${pct(v)}%</span></div>`).join('')}</div>
   </div>`;
 }
 function callRow(c){
@@ -390,7 +408,7 @@ async function refresh(){
   const a=s.alert[0];
   if(a && a.ts>lastAlertTs){ lastAlertTs=a.ts; if(!d.private_window && a.title.startsWith('On this call')) showLive(a); }
 }
-async function loadStory(){ await post('/demo/seed',{}); refresh(); }
+async function loadStory(){ await post('/demo/seed',{}); refresh(); await post('/assess',{}); refresh(); }
 async function resetAll(){ await post('/reset',{}); location.reload(); }
 
 j('/state').then(s=>{ lastAlertTs=(s.alert[0]||{}).ts||0; });   // don't replay an old alert on page load
