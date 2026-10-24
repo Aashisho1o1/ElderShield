@@ -9,3 +9,7 @@ eldershield_state.db
 
 # compiled by device_watch.py on first run
 macos/eldershield-warning
+
+# built by capture-test.sh
+macos/CaptureTest.app/
+macos/capture-test.log
