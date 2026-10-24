@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Per-device secrets and runtime state. The server creates these on first run; never commit them.
+device_ed25519.key
+device.salt
+eldershield_state.db
