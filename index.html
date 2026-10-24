@@ -29,7 +29,7 @@
     -webkit-backdrop-filter:blur(16px) saturate(140%);backdrop-filter:blur(16px) saturate(140%)}
   .sep{width:3px;height:3px;border-radius:50%;background:var(--label)}
   .led{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--good);flex:none}
-  .led.off{background:var(--label)} .led.warn{background:var(--warn)}
+  .led.warn{background:var(--warn)}
   .led.bad{background:var(--bad);animation:pulse 1.6s ease-in-out infinite}
   @keyframes pulse{50%{opacity:.35}}
   #deviceLine.live{color:var(--warn)}
@@ -45,8 +45,8 @@
   .btn-chase{background:var(--chase);color:#fff;width:100%;height:46px;border-radius:10px;font-size:15px;font-weight:600}
   .btn-chase:hover{transform:none;filter:brightness(1.08)}
 
-  .wrap{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:12px;padding:0 16px 24px;max-width:1080px;margin:0 auto}
-  @media(max-width:900px){.wrap{grid-template-columns:1fr}}
+  .wrap{display:grid;grid-template-columns:minmax(0,1fr) 440px;gap:12px;padding:0 16px 24px;max-width:1140px;margin:0 auto;align-items:start}
+  @media(max-width:960px){.wrap{grid-template-columns:1fr}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
   .card h2{margin:0;padding:12px 16px;font-size:13px;font-weight:500;border-bottom:1px solid var(--line);
            display:flex;align-items:center;gap:8px}
@@ -66,7 +66,8 @@
   .k{font-size:12px;color:var(--label)} .v{font-weight:600;letter-spacing:.06em}
   #actionOut{margin-top:14px;font-size:13px;color:var(--sub)}
 
-  .sec{font-size:12px;font-weight:500;color:var(--sub);margin:20px 0 8px} .sec:first-child{margin-top:0}
+  .sec{font-size:12px;font-weight:500;color:var(--sub);margin:22px 0 8px;display:flex;align-items:center;gap:8px}
+  .sec:first-child{margin-top:0}
   .chips{display:flex;gap:6px;flex-wrap:wrap}
   .chip{font:11px/1.7 var(--mono);color:var(--sub);border:1px solid var(--line);border-radius:6px;padding:0 7px}
   .chip.bad{color:var(--bad);border-color:rgba(248,113,113,.3)}
@@ -77,6 +78,26 @@
   .d-INTERCEPT{color:var(--bad);border-color:rgba(248,113,113,.35)}
   .verdict{display:flex;align-items:center;gap:10px}
   ul.reasons{margin:8px 0 0;padding-left:18px;color:var(--sub)}
+
+  /* the memory: one card per caller, then the call journal */
+  .person{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px}
+  .person.high{border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.04)}
+  .person.watch{border-color:rgba(251,191,36,.28)}
+  .p-head{display:flex;align-items:center;gap:8px}
+  .badge{font-size:11px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--sub)}
+  .high .badge{color:var(--bad);border-color:rgba(248,113,113,.4)} .watch .badge{color:var(--warn);border-color:rgba(251,191,36,.4)}
+  .meta{font-size:12px;color:var(--label);margin-top:2px}
+  .ladder{display:flex;gap:3px;margin:10px 0 4px} .ladder i{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.08)}
+  .ladder i.on{background:var(--warn)} .high .ladder i.on{background:var(--bad)}
+  .ladder-names{display:flex;justify-content:space-between;font-size:10px;color:var(--label)}
+  .spark{display:flex;align-items:flex-end;gap:2px;height:22px;margin-top:10px}
+  .spark i{flex:1;background:rgba(255,255,255,.18);border-radius:1px;min-height:2px}
+  .high .spark i{background:rgba(248,113,113,.55)}
+  ul.flags{margin:8px 0 0;padding-left:18px;font-size:12.5px;color:var(--sub)}
+  .call{padding:10px 0;border-top:1px solid var(--line)} .call:first-child{border-top:0;padding-top:0}
+  .c-head{display:flex;gap:6px;align-items:baseline;font-size:12.5px;flex-wrap:wrap}
+  .snip{font-size:12.5px;color:var(--sub);font-style:italic;margin-top:4px}
+  .you{font-size:12.5px;color:var(--warn);margin-bottom:8px}
   .hint{font-size:12px;color:var(--label);margin:20px 0 0;border-top:1px solid var(--line);padding-top:12px}
 
   /* What a screen-sharing caller sees: a plain, believable stall */
@@ -115,34 +136,39 @@
       </div>
       <form id="wireForm" action="/bank/wire" method="post" data-es-action="wire_transfer">
         <label>Recipient name</label>
-        <input id="payee" value="Secure Recovery Account" />
+        <input id="payee" value="St. Mary's Medical Billing" />
         <label>Routing number</label>
         <input id="routing" value="021000021" />
         <label>Account number</label>
         <input id="account" value="987654321012" />
         <label>Amount (USD)</label>
-        <input id="amount" value="24500" inputmode="numeric" />
+        <input id="amount" value="8500" inputmode="numeric" />
         <label>Reason / memo</label>
-        <input id="memo" value="roof repair" />
+        <input id="memo" value="hospital" />
         <label class="check"><input type="checkbox" id="newpayee" checked> This is a new payee</label>
-        <button type="submit" class="btn-chase" id="submitBtn">Send $24,500 wire</button>
+        <button type="submit" class="btn-chase" id="submitBtn">Send $8,500 wire</button>
       </form>
       <div id="actionOut"></div>
     </div>
   </section>
 
-  <!-- For the people watching the demo: what ElderShield knows right now. -->
+  <!-- What ElderShield knows: this moment, each caller over weeks, and the call journal. -->
   <aside class="card">
-    <h2>What ElderShield sees <span class="sp"></span><span class="muted mono" id="pk">key …</span></h2>
+    <h2>What ElderShield remembers <span class="sp"></span>
+      <button class="btn-ghost btn-sm" onclick="loadStory()">Load 3-week story</button></h2>
     <div class="body">
       <div class="sec">This computer</div>
       <div id="device"><span class="muted">Device sensor off</span></div>
-      <div class="sec">Remembered</div>
-      <div id="memory"><span class="muted">Nothing yet</span></div>
+      <div id="liveCall"></div>
       <div class="sec">Last payment check</div>
       <div id="lastCheck"><span class="muted">No payment checked yet</span></div>
-      <p class="hint">Run <code>python device_watch.py</code> next to the server, or
-        <code>--pretend facetime,anydesk</code> to rehearse without a real call.</p>
+      <div class="sec">People</div>
+      <div id="you"></div>
+      <div id="people"><span class="muted">No calls yet</span></div>
+      <div class="sec">Recent calls</div>
+      <div id="calls"><span class="muted">No calls yet</span></div>
+      <p class="hint">Run <code>python device_watch.py</code> next to the server. To rehearse:
+        <code>--pretend facetime --caller Daniel --script demo/romance_call.txt</code></p>
     </div>
   </aside>
 </div>
@@ -154,22 +180,22 @@
     <div class="muted" id="decoySub">Please wait.</div>
     <div class="bar"><div class="fill" id="decoyFill"></div></div>
     <div class="muted mono" id="decoyPct">3%</div>
-    <button class="btn-ghost" onclick="closeAlert();dismissDecoy()">[Senior] I've hung up — close this</button>
+    <button class="btn-ghost" onclick="hungUp()">[Senior] I've hung up — show me</button>
   </div>
 </div>
 
 <script>
 const API = location.origin;
-let pendingOverride=null, decoyTimer=null, unlockTimer=null;
+let pendingOverride=null, decoyTimer=null, unlockTimer=null, lastAlertTs=0;
 
 async function j(url,opts){ const r=await fetch(API+url,opts); return r.json(); }
 function post(url,body){ return j(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); }
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=()=>'$'+Number(document.getElementById('amount').value||0).toLocaleString();
 const cap=s=>s.charAt(0).toUpperCase()+s.slice(1);
+const when=iso=>new Date(iso).toLocaleString([], {weekday:'short', hour:'numeric', minute:'2-digit'});
 function setStatus(level,text){ document.getElementById('led').className='led '+level; document.getElementById('status').textContent=text; }
 
-(async()=>{ const h=await j('/health'); document.getElementById('pk').textContent='key '+h.device_pubkey.slice(0,10)+'…'; })();
 document.getElementById('amount').addEventListener('input',()=>{ document.getElementById('submitBtn').textContent=`Send ${money()} wire`; });
 
 /* Action-Intent Firewall hook: capture phase, before the page's own handlers. The form never
@@ -182,47 +208,48 @@ document.addEventListener('submit', ev=>{
 
 async function sendPayment(){
   const res = await post('/evaluate/action', {
-    tab_id:'bank', origin:'chase.com', action_type:'wire_transfer',
+    origin:'chase.com', action_type:'wire_transfer',
     amount:Number(document.getElementById('amount').value||0),
-    memo:document.getElementById('memo').value,
     new_payee:document.getElementById('newpayee').checked,
     routing_number:document.getElementById('routing').value,
     account_number:document.getElementById('account').value,
-    override_token:pendingOverride, use_llm:false
+    override_token:pendingOverride
   });
   showLastCheck(res);
   if(res.decision==='ALLOW'){
     pendingOverride=null; setStatus('','Watching');
     document.getElementById('actionOut').textContent=`Sent ${money()} to ${document.getElementById('payee').value} (simulated).`;
+    refresh();
     return res;
   }
   setStatus(res.decision==='INTERCEPT'?'bad':'warn','Paused');
   document.getElementById('actionOut').textContent='Not sent yet: ElderShield paused it.';
   showDecoy(res.decoy);
-  // With device_watch.py running and someone possibly watching, the alert is in a window screen
+  // While someone may be watching and device_watch.py is running, the alert is in a window screen
   // sharing can't see; this page may be on the caller's screen, so it shows only the stall.
   if(!res.private_overlay) showAlert(res);
   refresh();
   return res;
 }
 
+// After the call, the senior closes the stall and the payment is checked again as things are now,
+// so the alert (with "Send anyway") shows today's reasons, not the ones from during the call.
+function hungUp(){ dismissDecoy(); sendPayment(); }
+
 function showLastCheck(res){
   document.getElementById('lastCheck').innerHTML=
-    `<div class="verdict"><span class="decision d-${res.decision}">${res.decision}</span><span>score <b>${res.causality_score}</b>/100</span></div>
+    `<div class="verdict"><span class="decision d-${res.decision}">${res.decision}</span><span>score <b>${res.score}</b>/100</span></div>
      ${res.reasons.length?`<ul class="reasons">${res.reasons.map(r=>`<li>${esc(r)}</li>`).join('')}</ul>`:''}
      <div class="chips" style="margin-top:8px">${Object.entries(res.components||{}).map(([k,v])=>`<span class="chip">${esc(k)} +${v}</span>`).join('')}</div>`;
 }
 
-/* The Cluely-style alert: drops out of the island. "Don't send" is the easy choice; "Send anyway"
-   is always there, but while someone may be watching it waits for the call to end. */
-function showAlert(res){
+/* The Cluely-style card: drops out of the island, in a Shadow DOM the bank page can't restyle. */
+function card({title, items, note, red, buttons}){
   closeAlert();
-  document.getElementById('decoy').classList.add('with-alert');
   const host=document.createElement('div'); host.id='es-alert';
   host.style.cssText='position:fixed;left:50%;top:60px;transform:translateX(-50%);z-index:60;max-width:540px;width:calc(100% - 32px)';
   document.body.appendChild(host);
-  const root=host.attachShadow({mode:'open'});   // the bank page can't restyle or hide it
-  const locked = res.decision==='INTERCEPT' && res.someone_watching;
+  const root=host.attachShadow({mode:'open'});
   root.innerHTML=`
     <style>
       .w{font:16px/1.55 Inter,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:#edeef2;
@@ -230,10 +257,10 @@ function showAlert(res){
          box-shadow:0 0 0 1px rgba(207,226,255,.24),0 -.5px 0 rgba(255,255,255,.5),0 24px 64px rgba(0,0,0,.6)}
       @keyframes in{from{opacity:0;transform:translateY(-6px) scale(.98)}}
       .h{display:flex;align-items:center;gap:8px;font-size:13px;color:#898b91;margin-bottom:8px}
-      .led{width:6px;height:6px;border-radius:50%;background:${res.decision==='INTERCEPT'?'#f87171':'#fbbf24'}}
+      .led{width:6px;height:6px;border-radius:50%;background:${red?'#f87171':'#fbbf24'}}
       .t{font-size:23px;line-height:1.25;font-weight:600;letter-spacing:-.01em;margin-bottom:10px}
       ul{margin:0;padding-left:20px} li{margin:2px 0}
-      .s{font-size:14px;color:#b2b3ba;margin-top:12px}
+      .s{font-size:14px;color:#b2b3ba;margin-top:12px;white-space:pre-line}
       .primary{width:100%;height:46px;margin-top:18px;border:0;border-radius:12px;cursor:pointer;color:#fff;font:inherit;font-size:15px;font-weight:600;
                background:linear-gradient(180deg,#0544a9,#022c70);box-shadow:0 0 0 .5px #0c44a1,inset 0 -1px 0 #022c70,inset 0 .5px 0 #81b6ff}
       .later{margin-top:12px;text-align:center}
@@ -244,35 +271,55 @@ function showAlert(res){
     </style>
     <div class="w" role="alert">
       <div class="h"><span class="led"></span>ElderShield</div>
-      <div class="t">Wait — before you send ${money()}</div>
-      <ul>${res.reasons.map(r=>`<li>${esc(cap(r))}</li>`).join('')}</ul>
-      <div class="s">${res.someone_watching?"If someone on a call is telling you to do this, it's safe to hang up.":"A real bank won't mind you taking a minute to check."}</div>
-      <button class="primary" id="dont">Don't send</button>
-      <div class="later"><button class="link" id="anyway"></button></div>
+      <div class="t">${esc(title)}</div>
+      ${items.length?`<ul>${items.map(r=>`<li>${esc(cap(r))}</li>`).join('')}</ul>`:''}
+      <div class="s">${esc(note)}</div>
+      <button class="primary" id="primary">${esc(buttons[0])}</button>
+      ${buttons[1]?'<div class="later"><button class="link" id="anyway"></button></div>':''}
     </div>`;
+  return root;
+}
+
+/* Payment paused. "Don't send" is the easy choice; "Send anyway" is always there, but waits while
+   a remote-control app runs (someone else may click it) or, for a high-risk payment, during a call. */
+function showAlert(res){
+  document.getElementById('decoy').classList.add('with-alert');
+  const root=card({title:`Wait — before you send ${money()}`, items:res.reasons, red:res.decision==='INTERCEPT',
+    note: res.decoy ? "If someone on a call is telling you to do this, it's safe to hang up."
+                    : "A real bank, or a real friend, won't mind you taking a day to check.",
+    buttons:["Don't send", true]});
   const anyway=root.getElementById('anyway');
   const unlock=()=>{ anyway.disabled=false; anyway.textContent='Send anyway'; };
-  root.getElementById('dont').onclick=()=>{ closeAlert(); dismissDecoy(); setStatus('','Watching');
+  root.getElementById('primary').onclick=()=>{ closeAlert(); dismissDecoy(); setStatus('','Watching');
     document.getElementById('actionOut').textContent='Not sent. Good call.'; };
   anyway.onclick=async()=>{
-    const o=await post('/override',{action_id:res.action_id, reason:'Senior chose to send anyway'});
-    if(o.error){ anyway.disabled=true; anyway.textContent='Hang up first, then you can send it'; waitForNobody(unlock); return; }
+    const o=await post('/override',{action_id:res.action_id});
+    if(o.error==='wait_until_nobody_is_watching'){ anyway.disabled=true; anyway.textContent='Hang up and close remote control first'; waitForNobody(unlock); return; }
+    if(o.error){ anyway.disabled=true; anyway.textContent='Please press Send again'; return; }
     pendingOverride=o.override_token;              // works once, for this exact payment
     closeAlert(); dismissDecoy(); sendPayment();
   };
-  if(locked){
+  if(res.locked){
     anyway.disabled=true;
     anyway.textContent='Send anyway · available once the call ends'+(res.reasons.some(r=>r.includes('remote-control'))?' and remote control is closed':'');
     waitForNobody(unlock);
   } else unlock();
 }
 
+/* Something risky was just said on the call. Shown here only if the private window isn't running. */
+function showLive(a){
+  const root=card({title:a.title, items:[], note:a.body, red:true, buttons:['Got it']});
+  root.getElementById('primary').onclick=closeAlert;
+  setTimeout(()=>{ const h=document.getElementById('es-alert'); if(h && h.shadowRoot===root) closeAlert(); }, 20000);
+}
+
 function waitForNobody(then){
   clearInterval(unlockTimer);
-  unlockTimer=setInterval(async()=>{
+  const check=async()=>{
     const d=(await j('/state')).device;
     if(!d.call_app && !d.remote_access.length){ clearInterval(unlockTimer); then(); }
-  }, 1500);
+  };
+  unlockTimer=setInterval(check, 1500); check();
 }
 function closeAlert(){
   clearInterval(unlockTimer);
@@ -292,26 +339,56 @@ function showDecoy(d){
 }
 function dismissDecoy(){ clearInterval(decoyTimer); document.getElementById('decoy').style.display='none'; }
 
+const STAGE_SHORT=['','getting to know','love-bombing','isolating','asking','escalating'];
+function personCard(c){
+  const max=Math.max(1,...c.per_day);
+  return `<div class="person ${c.risk}">
+    <div class="p-head"><b>${esc(c.name)}</b><span class="badge">${esc(c.stage_name)}</span></div>
+    <div class="meta">known ${c.days_known} days · ${c.calls} call${c.calls===1?'':'s'} · ${c.calls_this_week} this week · ${c.minutes_this_week} min this week</div>
+    ${c.stage>=2?`<div class="ladder">${[1,2,3,4,5].map(i=>`<i class="${i<=c.stage?'on':''}"></i>`).join('')}</div>
+      <div class="ladder-names">${STAGE_SHORT.slice(1).map(s=>`<span>${s}</span>`).join('')}</div>`:''}
+    <div class="spark" title="calls per day, last 3 weeks">${c.per_day.map(n=>`<i style="height:${Math.round(n/max*100)}%"></i>`).join('')}</div>
+    ${c.flags.length?`<ul class="flags">${c.flags.map(f=>`<li>${esc(f)}</li>`).join('')}</ul>`:''}
+  </div>`;
+}
+function callRow(c){
+  return `<div class="call">
+    <div class="c-head"><span>${when(c.started)}</span><b>${esc(c.who)}</b><span class="muted">${esc(c.app)} · ${c.minutes} min</span>
+      ${c.live?'<span class="chip bad">live</span>':''}${c.late?'<span class="chip">late night</span>':''}
+      ${c.remote_access.map(r=>`<span class="chip bad">${esc(r)}</span>`).join('')}</div>
+    ${c.heard.length?`<div class="chips" style="margin-top:4px">${[...new Set(c.heard.map(h=>h.words))].map(w=>`<span class="chip warn">${esc(w)}</span>`).join('')}</div>`:''}
+    ${c.heard.filter(h=>h.snippet).slice(0,2).map(h=>`<div class="snip">“${esc(h.snippet)}”</div>`).join('')}
+    ${c.payments.map(p=>`<div class="meta">tried to send $${Number(p.amount||0).toLocaleString()} · ${esc(p.decision)}</div>`).join('')}
+  </div>`;
+}
+
 async function refresh(){
-  const d=(await j('/state')).device;
+  const s=await j('/state'), d=s.device, t=s.track;
   const line=document.getElementById('deviceLine');
-  const live=[d.call_app&&`${d.call_app} call`, ...d.remote_access].filter(Boolean);
+  const live=[d.call_app&&`${d.call_app} call${d.caller?' · '+d.caller:''}`, ...d.remote_access].filter(Boolean);
   line.textContent=!d.sensor_live?'Sensor off':(live.length?live.join(' · '):'No call');
   line.className='opt'+(live.length?' live':' muted');
   document.getElementById('device').innerHTML=!d.sensor_live
     ? '<span class="muted">Device sensor off</span>'
     : `<div class="chips">
-         <span class="chip ${d.call_app?'bad':''}">${d.call_app?esc(d.call_app)+' call live':'no call'}</span>
+         <span class="chip ${d.call_app?'bad':''}">${d.call_app?esc(d.call_app)+' call'+(d.caller?' with '+esc(d.caller):'')+' live':'no call'}</span>
          ${d.remote_access.map(r=>`<span class="chip bad">${esc(r)} running</span>`).join('')}
-         ${d.remote_access.length?'':'<span class="chip">no remote control</span>'}
+         ${d.remote_access_earlier.map(r=>`<span class="chip warn">${esc(r)} ran earlier today</span>`).join('')}
          ${d.private_window?'<span class="chip">private alerts on</span>':''}
        </div>`;
-  document.getElementById('memory').innerHTML = d.remote_access_earlier.length
-    ? `<div class="chips">${d.remote_access_earlier.map(r=>`<span class="chip warn">${esc(r)} ran earlier today</span>`).join('')}</div>`
-    : '<span class="muted">Nothing yet</span>';
+  const liveCall=t.recent_calls.find(c=>c.live);
+  document.getElementById('liveCall').innerHTML = liveCall && liveCall.heard.length
+    ? `<div class="sec">On this call</div>${callRow(liveCall)}` : '';
+  document.getElementById('you').innerHTML = t.you.change ? `<div class="you">Her week: ${esc(t.you.change)}</div>` : '';
+  document.getElementById('people').innerHTML = t.contacts.length ? t.contacts.map(personCard).join('') : '<span class="muted">No calls yet</span>';
+  document.getElementById('calls').innerHTML = t.recent_calls.length ? t.recent_calls.slice(0,6).map(callRow).join('') : '<span class="muted">No calls yet</span>';
+  const a=s.alert[0];
+  if(a && a.ts>lastAlertTs){ lastAlertTs=a.ts; if(!d.private_window && a.title.startsWith('On this call')) showLive(a); }
 }
+async function loadStory(){ await post('/demo/seed',{}); refresh(); }
 async function resetAll(){ await post('/reset',{}); location.reload(); }
 
+j('/state').then(s=>{ lastAlertTs=(s.alert[0]||{}).ts||0; });   // don't replay an old alert on page load
 setInterval(refresh, 2000); refresh();
 </script>
 </body>

@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key><string>org.eldershield.capture-test</string>
-  <key>CFBundleName</key><string>ElderShield capture test</string>
-  <key>CFBundleExecutable</key><string>capture-test</string>
+  <key>CFBundleName</key><string>ElderShield listener</string>
+  <key>CFBundleExecutable</key><string>listen</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleShortVersionString</key><string>0.1</string>

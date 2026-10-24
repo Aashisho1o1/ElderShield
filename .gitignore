@@ -11,5 +11,5 @@ eldershield_state.db
 macos/eldershield-warning
 
 # built by capture-test.sh
-macos/CaptureTest.app/
+macos/Listen.app/
 macos/capture-test.log

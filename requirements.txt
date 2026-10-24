@@ -1,9 +1,6 @@
 fastapi>=0.110
 uvicorn>=0.29
 pydantic>=2.5
-cryptography>=42.0
-# optional: the cloud investigator (only used when ANTHROPIC_API_KEY is set)
-anthropic>=2.0
 
 # tests (python test_e2e.py; then `playwright install chromium` once for the browser checks)
 httpx2
