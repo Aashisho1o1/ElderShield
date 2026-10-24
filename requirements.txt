@@ -3,5 +3,5 @@ uvicorn>=0.29
 pydantic>=2.5
 
 # tests (python test_e2e.py; then `playwright install chromium` once for the browser checks)
-httpx2
+httpx2          # the test client's HTTP library (Starlette's successor to httpx)
 playwright

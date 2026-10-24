@@ -36,6 +36,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+import jev
+
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
@@ -117,8 +119,9 @@ def ago(seconds: float) -> str:
 # What was said: labels for a piece of call transcript
 # --------------------------------------------------------------------------- #
 
-# Each label: (phrases, confidence). The rules are the floor; a model such as Jev can replace
-# classify() later and return the same shape with calibrated confidences.
+# Each label: (phrases, confidence). The rules are the floor and work offline; with a
+# TYPESAFE_API_KEY, Jev (jev.py) also hears each finished sentence and adds the labels the rules
+# miss, with a calibrated probability each.
 LEXICON: dict[str, tuple[list[str], float]] = {
     "endearment": (["my love", "darling", "sweetheart", "my dear", "soulmate", "soul mate", "my queen",
                     "my king", "i love you", "love of my life", "falling for you", "my angel"], 0.8),
@@ -136,7 +139,7 @@ LEXICON: dict[str, tuple[list[str], float]] = {
                     "read me the numbers"], 0.95),
     "crypto_investment": (["bitcoin", "crypto", "usdt", "trading platform", "guaranteed return",
                            "double your money", "investment opportunity"], 0.85),
-    "remote_access": (["anydesk", "teamviewer", "remote access", "install this app", "download this app",
+    "remote_access": (["anydesk", "any desk", "teamviewer", "team viewer", "remote access", "install this app", "download this app",
                        "share your screen", "screen share"], 0.9),
     "one_time_code": (["verification code", "the code we sent", "read me the code", "one-time code",
                        "six-digit code", "the code you just got"], 0.95),
@@ -179,6 +182,25 @@ def classify(text: str) -> list[tuple[str, float, int]]:
     return found
 
 
+def finished_sentences(text: str) -> list[tuple[str, int]]:
+    """Sentences in a transcript that are complete: (sentence, position). The listener sends a
+    growing transcript every ~0.8 s; the sentence being spoken is still changing, so Jev waits
+    for the one before it. Live speech often has no punctuation, so a long run of words is cut
+    into ~12-word pieces instead."""
+    out, start = [], 0
+    for m in re.finditer(r"[.?!]+(\s+|$)", text):
+        out.append((text[start:m.end()].strip(), start))
+        start = m.end()
+    tail = text[start:].strip()
+    words = tail.split()
+    while len(words) > 24:                      # no punctuation: the first 12 words are settled
+        piece = " ".join(words[:12])
+        out.append((piece, text.find(piece, start)))
+        start = text.find(piece, start) + len(piece)
+        words = words[12:]
+    return [(s, p) for s, p in out if len(s.split()) >= 3]
+
+
 def snippet_around(text: str, pos: int) -> str:
     """The sentence around a match, short, with long numbers (codes, accounts) removed."""
     start = max(text.rfind(".", 0, pos), text.rfind("?", 0, pos), text.rfind("!", 0, pos)) + 1
@@ -209,7 +231,8 @@ class Store:
                 started REAL NOT NULL, ended REAL, remote_access TEXT NOT NULL DEFAULT '[]');
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, call_id TEXT NOT NULL, contact_id TEXT NOT NULL,
-                ts REAL NOT NULL, label TEXT NOT NULL, confidence REAL NOT NULL, snippet TEXT);
+                ts REAL NOT NULL, label TEXT NOT NULL, confidence REAL NOT NULL, snippet TEXT,
+                source TEXT NOT NULL DEFAULT 'rules');
             CREATE TABLE IF NOT EXISTS remote_access_seen (name TEXT PRIMARY KEY, last_seen REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS payments (
                 action_id TEXT PRIMARY KEY, ts REAL NOT NULL, fingerprint TEXT NOT NULL, action_type TEXT NOT NULL,
@@ -220,6 +243,8 @@ class Store:
             CREATE INDEX IF NOT EXISTS ix_calls_contact ON calls(contact_id, started);
             CREATE INDEX IF NOT EXISTS ix_signals_contact ON signals(contact_id, ts);
         """)
+        if "source" not in [r[1] for r in self.conn.execute("PRAGMA table_info(signals)")]:   # journals from before Jev
+            self.conn.execute("ALTER TABLE signals ADD COLUMN source TEXT NOT NULL DEFAULT 'rules'")
         self.conn.commit()
         self._lock = Lock()
         self.report: dict[str, Any] = {}
@@ -227,6 +252,7 @@ class Store:
         self.alert: Optional[dict[str, Any]] = None   # the latest private alert; the sensor shows each new one
         self._heard: dict[tuple[str, int, str], int] = {}  # (call, chunk, label) -> its signal row
         self._alerted: set[tuple[str, str]] = set()     # (call, label) already alerted
+        self._asked_jev: set[tuple[str, str]] = set()   # (call, sentence) Jev has already been asked about
 
     # -- device and calls ----------------------------------------------------
     def update_device(self, report: dict[str, Any]) -> None:
@@ -284,22 +310,44 @@ class Store:
 
     # -- what was heard --------------------------------------------------------
     def hear(self, chunk: int, text: str) -> list[dict[str, Any]]:
-        """Store new labels heard on the current call; returns them."""
+        """Store the labels the rules hear in this transcript; returns the new ones. Finished
+        sentences also go to Jev, whose labels arrive through hear_from_jev() a moment later."""
         call = self.current_call()
         if not call:
             return []
+        new = self._record(call, chunk, text, classify(text))
+        for sentence, pos in finished_sentences(text):
+            key = (call["id"], sentence)
+            if key in self._asked_jev:
+                continue
+            self._asked_jev.add(key)
+            jev.classify_async(sentence, lambda labels, s=sentence, p=pos, c=chunk: self.hear_from_jev(call, c, s, labels))
+        return new
+
+    def hear_from_jev(self, call: dict[str, Any], chunk: int, sentence: str, labels: list[tuple[str, float]]) -> None:
+        """Jev's labels for one sentence. The rules' row for the same label wins; Jev adds only
+        what they missed, and raises the live alert for it like any other label."""
+        found = [(label, prob, 0) for label, prob in labels]
+        for h in self._record(call, chunk, sentence, found, source="jev"):
+            if h["alert"]:
+                raise_live_alert(self, call, h["label"])
+
+    def _record(self, call: dict[str, Any], chunk: int, text: str,
+                found: list[tuple[str, float, int]], source: str = "rules") -> list[dict[str, Any]]:
         new = []
         with self._lock:
-            for label, conf, pos in classify(text):
+            for label, conf, pos in found:
                 key = (call["id"], chunk, label)
                 snippet = snippet_around(text, pos) if KEEP_SNIPPETS else None
                 if key in self._heard:          # the same chunk again, usually more of the sentence
-                    self.conn.execute("UPDATE signals SET snippet=? WHERE id=?", (snippet, self._heard[key]))
+                    if source == "rules":
+                        self.conn.execute("UPDATE signals SET snippet=? WHERE id=?", (snippet, self._heard[key]))
                     continue
-                cur = self.conn.execute("INSERT INTO signals (call_id, contact_id, ts, label, confidence, snippet) "
-                                        "VALUES (?,?,?,?,?,?)", (call["id"], call["contact_id"], now_ts(), label, conf, snippet))
+                cur = self.conn.execute("INSERT INTO signals (call_id, contact_id, ts, label, confidence, snippet, source) "
+                                        "VALUES (?,?,?,?,?,?,?)",
+                                        (call["id"], call["contact_id"], now_ts(), label, conf, snippet, source))
                 self._heard[key] = cur.lastrowid
-                new.append({"label": label, "confidence": conf, "snippet": snippet,
+                new.append({"label": label, "confidence": conf, "snippet": snippet, "source": source,
                             "alert": (call["id"], label) not in self._alerted and label in LIVE_ALERTS})
                 self._alerted.add((call["id"], label))
             self.conn.commit()
@@ -359,6 +407,7 @@ class Store:
             self.alert = None
             self._heard.clear()
             self._alerted.clear()
+            self._asked_jev.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -446,13 +495,15 @@ def track(store: Store) -> dict[str, Any]:
 
     recent = []
     for call in store.conn.execute("SELECT * FROM calls ORDER BY started DESC LIMIT 12").fetchall():
-        sigs = store.conn.execute("SELECT label, snippet FROM signals WHERE call_id=? ORDER BY ts", (call["id"],)).fetchall()
+        sigs = store.conn.execute("SELECT label, snippet, source, confidence FROM signals WHERE call_id=? ORDER BY ts",
+                                  (call["id"],)).fetchall()
         paid = store.conn.execute("SELECT amount, decision FROM payments WHERE call_id=?", (call["id"],)).fetchall()
         recent.append({
             "id": call["id"], "who": names.get(call["contact_id"], "Unknown caller"), "app": call["app"],
             "started": iso(call["started"]), "live": call["ended"] is None, "minutes": round(_minutes(call, now)),
             "late": _late(call["started"]), "remote_access": json.loads(call["remote_access"]),
-            "heard": [{"label": s["label"], "words": LABEL_WORDS[s["label"]], "snippet": s["snippet"]} for s in sigs],
+            "heard": [{"label": s["label"], "words": LABEL_WORDS[s["label"]], "snippet": s["snippet"],
+                       "source": s["source"], "confidence": s["confidence"]} for s in sigs],
             "payments": [dict(p) for p in paid],
         })
 
@@ -667,23 +718,27 @@ def device_alerts(after: float = 0) -> list[dict[str, Any]]:
     return STORE.alert_after(after)
 
 
+def raise_live_alert(store: Store, call: dict[str, Any], label: str) -> None:
+    who = store.conn.execute("SELECT label FROM contacts WHERE id=?", (call["contact_id"],)).fetchone()[0]
+    store.push_alert(f"On this call: {LABEL_WORDS[label]}",
+                     LIVE_ALERTS[label] + ("" if who == "Unknown caller" else f"\n\n(The caller: {who}.)"))
+
+
 @app.post("/calls/transcript")
 def call_transcript(t: TranscriptIn) -> dict[str, Any]:
     """The listener (or the demo script) sends what it hears on the current call. Only the
     labels and, if enabled, the flagged sentence are kept; the rest is dropped here."""
     heard = STORE.hear(t.chunk, t.text)
+    call = STORE.current_call()
     for h in heard:
-        if h["alert"]:
-            call = STORE.current_call()
-            who = STORE.conn.execute("SELECT label FROM contacts WHERE id=?", (call["contact_id"],)).fetchone()[0]
-            STORE.push_alert(f"On this call: {LABEL_WORDS[h['label']]}",
-                             LIVE_ALERTS[h["label"]] + ("" if who == "Unknown caller" else f"\n\n(The caller: {who}.)"))
-    return {"heard": [{k: h[k] for k in ("label", "confidence", "snippet")} for h in heard]}
+        if h["alert"] and call:
+            raise_live_alert(STORE, call, h["label"])
+    return {"heard": [{k: h[k] for k in ("label", "confidence", "snippet", "source")} for h in heard]}
 
 
 @app.get("/state")
 def state() -> dict[str, Any]:
-    return {"device": STORE.device(), "track": track(STORE), "alert": STORE.alert_after(0)}
+    return {"device": STORE.device(), "track": track(STORE), "alert": STORE.alert_after(0), "jev": jev.STATUS.snapshot()}
 
 
 @app.post("/reset")

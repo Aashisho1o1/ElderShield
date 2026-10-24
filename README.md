@@ -65,6 +65,23 @@ alert is up; the recording should show the stall but not the alert.
 FaceTiming your own Mac: open FaceTime and record a Voice Memo (the sensor treats that as a call),
 or join a FaceTime link from an Android/Windows browser, or answer an iPhone call on the Mac.
 
+## Jev: hearing what the phrase rules miss
+
+The phrase rules catch the obvious wording ("gift cards", "don't tell"). With a key, every
+finished sentence of the call also goes to [Jev](https://openrouter.ai/typesafe), a decision
+model that answers ten yes/no questions ("the speaker asks for money", "the speaker asks for
+secrecy", …) in about 300–500 ms with a calibrated probability each. That is how *"I'm a bit short
+until my pension clears, could you help me out?"* becomes **asked for money** with no keyword in
+it. Jev returns numbers only; nothing it produces is shown to the senior as text.
+
+```bash
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env     # Jev via OpenRouter (the .env file is git-ignored)
+set -a; source .env; set +a; python server.py
+```
+
+`TYPESAFE_API_KEY` works the same way against TypeSafe's own API. Without a key the rules run alone.
+Labels Jev added show a small "·jev" tag on the call. Cost: about $0.00002 per sentence.
+
 ## The alert, and "Send anyway"
 
 | Score | Result |

@@ -72,6 +72,7 @@
   .chip{font:11px/1.7 var(--mono);color:var(--sub);border:1px solid var(--line);border-radius:6px;padding:0 7px}
   .chip.bad{color:var(--bad);border-color:rgba(248,113,113,.3)}
   .chip.warn{color:var(--warn);border-color:rgba(251,191,36,.3)}
+  .chip.good{color:var(--good);border-color:rgba(74,222,128,.3)}
   .decision{font-size:11px;font-weight:600;letter-spacing:.06em;padding:2px 10px;border-radius:999px;border:1px solid}
   .d-ALLOW{color:var(--good);border-color:rgba(74,222,128,.35)}
   .d-CHALLENGE{color:var(--warn);border-color:rgba(251,191,36,.35)}
@@ -159,6 +160,7 @@
     <div class="body">
       <div class="sec">This computer</div>
       <div id="device"><span class="muted">Device sensor off</span></div>
+      <div id="jev" style="margin-top:6px;font-size:12px"></div>
       <div id="liveCall"></div>
       <div class="sec">Last payment check</div>
       <div id="lastCheck"><span class="muted">No payment checked yet</span></div>
@@ -356,7 +358,7 @@ function callRow(c){
     <div class="c-head"><span>${when(c.started)}</span><b>${esc(c.who)}</b><span class="muted">${esc(c.app)} · ${c.minutes} min</span>
       ${c.live?'<span class="chip bad">live</span>':''}${c.late?'<span class="chip">late night</span>':''}
       ${c.remote_access.map(r=>`<span class="chip bad">${esc(r)}</span>`).join('')}</div>
-    ${c.heard.length?`<div class="chips" style="margin-top:4px">${[...new Set(c.heard.map(h=>h.words))].map(w=>`<span class="chip warn">${esc(w)}</span>`).join('')}</div>`:''}
+    ${c.heard.length?`<div class="chips" style="margin-top:4px">${[...new Map(c.heard.map(h=>[h.words,h])).values()].map(h=>`<span class="chip warn" title="${h.source==='jev'?'heard by Jev, '+Math.round(h.confidence*100)+'% sure':'matched a known phrase'}">${esc(h.words)}${h.source==='jev'?' <small>·jev</small>':''}</span>`).join('')}</div>`:''}
     ${c.heard.filter(h=>h.snippet).slice(0,2).map(h=>`<div class="snip">“${esc(h.snippet)}”</div>`).join('')}
     ${c.payments.map(p=>`<div class="meta">tried to send $${Number(p.amount||0).toLocaleString()} · ${esc(p.decision)}</div>`).join('')}
   </div>`;
@@ -376,6 +378,9 @@ async function refresh(){
          ${d.remote_access_earlier.map(r=>`<span class="chip warn">${esc(r)} ran earlier today</span>`).join('')}
          ${d.private_window?'<span class="chip">private alerts on</span>':''}
        </div>`;
+  const jv=s.jev||{};
+  document.getElementById('jev').innerHTML = !jv.enabled ? '<span class="muted">Jev off (set OPENROUTER_API_KEY): phrase rules only</span>'
+    : `<span class="chip ${jv.last_error?'bad':'good'}">Jev ${jv.last_error?'error':'on'}</span> <span class="muted">${jv.calls} sentence${jv.calls===1?'':'s'} asked${jv.last_ms!=null?' · last '+jv.last_ms+' ms':''}${jv.model?' · '+esc(jv.model):''}${jv.last_error?' · '+esc(jv.last_error):''}</span>`;
   const liveCall=t.recent_calls.find(c=>c.live);
   document.getElementById('liveCall').innerHTML = liveCall && liveCall.heard.length
     ? `<div class="sec">On this call</div>${callRow(liveCall)}` : '';
