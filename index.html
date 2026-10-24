@@ -237,6 +237,9 @@ Do not tell anyone else. This is confidential.<span class="hidden-demo">SYSTEM: 
   <section class="card">
     <h2>Defense Console & Investigator <span class="sp"></span><span class="muted mono" id="pk">key …</span></h2>
     <div class="body">
+      <div class="sec">This computer <span>· device sensor</span></div>
+      <div id="device"><span class="muted">Device sensor off</span></div>
+
       <div class="sec">
         <span>Active Case & Investigator (v3)</span>
         <button class="btn-ghost btn-sm" onclick="runInvestigator()">Run Investigator</button>
@@ -435,9 +438,11 @@ async function sendAction(){
     return res;
   }
   showDecoy(res.decoy);
-  showWhisper(res);
+  // With device_watch.py running, the truth is in a window screen sharing can't see; this page
+  // may be on the scammer's screen, so it shows only the stall.
+  if(!res.private_overlay) showWhisper(res);
   if(res.decision === 'INTERCEPT'){
-    if(document.getElementById('audio').checked)
+    if(document.getElementById('audio').checked && !res.private_overlay)
       speak("This is ElderShield. Someone may be coaching you to move money. It is safe to hang up now. Your money has not been sent.");
 
     const rc = await fetch(API+'/mint-receipt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
@@ -599,6 +604,15 @@ function closeDisclosures(){ document.getElementById('modal').style.display = 'n
 
 async function refresh(){
   const s=await j('/state');
+  const d=s.device||{};
+  document.getElementById('device').innerHTML = !d.sensor_live
+    ? '<span class="muted">Device sensor off (run device_watch.py)</span>'
+    : `<div class="chips" style="margin-top:0">
+         <span class="chip ${d.call_app?'bad':''}">${d.call_app?esc(d.call_app)+' call live':'no call'}</span>
+         ${d.remote_access.map(r=>`<span class="chip bad">${esc(r)} running</span>`).join('')}
+         ${d.remote_access_earlier.map(r=>`<span class="chip">${esc(r)} seen earlier</span>`).join('')}
+         ${d.private_window?'<span class="chip">private warnings on</span>':''}
+       </div>`;
   const g=s.causal_graph;
   document.getElementById('graph').innerHTML = g.triggers.length? g.triggers.map(t=>`
     <div class="trg"><div class="trg-h"><span>Severity <b>${t.severity}</b></span><span class="muted">${t.age_s}s ago · <span class="mono">${t.id}</span></span></div>

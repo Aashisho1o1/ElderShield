@@ -33,6 +33,55 @@ and there's time left in the budget.
 | `ELDERSHIELD_OVERRIDE_DELAY_S` | `86400` | cooling-off before an INTERCEPTed payment can be released (set e.g. `10` for a live demo) |
 | `ELDERSHIELD_ALLOWED_ORIGINS` | unset | comma-separated extra origins allowed to call the daemon, e.g. a `chrome-extension://…` id |
 
+### Scam warnings inside Gmail (Chrome extension)
+
+1. Start the server (`python server.py`).
+2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and
+   pick the `extension/` folder.
+3. Open Gmail. Each email you open shows ElderShield's verdict right above it: a warning card
+   that says why, or a small "no warning signs" pill.
+
+It reads only the emails you open and sends them only to the ElderShield server on this
+computer, which now also knows about them, so a scam read in Gmail arms the bank-transfer
+check. It also flags links whose text shows one web address but go to another. Gmail's page
+structure isn't an official API, so a Gmail redesign could require updating `content.js`.
+
+### Watch a real inbox
+
+```bash
+ELDERSHIELD_IMAP_USER=you@gmail.com ELDERSHIELD_IMAP_PASSWORD=<app password> python email_watch.py
+```
+
+With the server running, this polls the inbox every 20 s and sends each new message through
+the same `/ingest/trigger` path as the simulator's "Receive this message" button. It is
+read-only (nothing gets marked as read) and only picks up mail that arrives after it starts.
+It needs a provider with IMAP app passwords: Gmail (with 2-Step Verification), iCloud
+(`ELDERSHIELD_IMAP_HOST=imap.mail.me.com`), Yahoo, Fastmail. Providers that require OAuth
+sign-in aren't supported. Use a throwaway inbox for demos.
+
+### Live calls and remote control on this Mac
+
+```bash
+python device_watch.py                              # real sensors
+python device_watch.py --pretend facetime,anydesk   # rehearse the demo without a real call
+```
+
+Run it next to the server. Every 2 s it tells ElderShield whether a call is live (FaceTime,
+which also carries iPhone calls on a Mac, or Zoom, WhatsApp, Teams, while the microphone is in
+use) and whether a remote-control app is running (AnyDesk, TeamViewer, ScreenConnect, …). It
+needs no macOS permissions: it reads the process list and whether the microphone is in use,
+never audio or screen contents. Scoring: live call +15, remote-control app running +30, one seen
+earlier today +15 (scammers often disconnect before the transfer). A message read during a live
+call counts as a live-call message.
+
+When a payment is intercepted while someone may be watching, the page shows only the
+"processing" stall and the truth appears in a native window that screen sharing and screen
+capture can't see (`macos/Warning.swift`, built with `swiftc` on first run). Check this on the
+demo Mac: start a QuickTime screen recording, or share your screen on a call, while the warning
+is up. The recording should show the stall but not the warning. For comparison,
+`macos/eldershield-warning "Test" "Body" --visible-to-capture` shows the same window unprotected.
+`--speak` also says the warning aloud; use it only with headphones.
+
 ### Releasing a paused payment, and who may call the daemon
 
 - **CHALLENGE** → "Send it anyway" releases that payment at once. **INTERCEPT** → "I still want
@@ -167,12 +216,13 @@ playwright install chromium   # once, for the browser checks
 python test_e2e.py            # starts its own server; needs port 8777 free
 ```
 
-38 checks: clean-wire control, hot-path intercept and latency, plain-language
+43 checks: clean-wire control, hot-path intercept and latency, plain-language
 whisper, receipt verify + tamper rejection, live state validated against
 `schemas.py`, restart rehydration, the 3-day cold path and its control, the four
 replays (A–C intercept; D, a first-time contractor paid to the invoice's own account,
 is allowed), the override's cooling-off / binding / single use, no watch-item spill
-across payment kinds, storage privacy, the origin lock, and a real Chromium run
+across payment kinds, storage privacy, the origin lock, the device sensor (live call,
+remote control now and earlier, the hand-off to the private window), and a real Chromium run
 proving the `submit` is captured (no navigation), the decoy and whisper render, the
 release button schedules instead of sending, and class-hidden injection is caught.
 If port 8777 can't be used, the suite runs in-process and reports the browser checks

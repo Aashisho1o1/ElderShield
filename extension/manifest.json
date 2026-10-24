@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "ElderShield for Gmail",
+  "version": "0.1.0",
+  "description": "Checks each email you open in Gmail for scam warning signs, using the ElderShield app on this computer.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoS1xZe+s6/LygeVtMlSR7aGbwEDzDT7PHgkbFnCNcx3yheBxKAg/Ry6zuKxW+DI4h4jlKrwep76eCgwIMUwdjS4C3VFc/hc8Sl3HqqzETV/dDBCc2hL76zBOkyO1OGCFVbUu/6FQ2XLE24K1SxIA/Rouv3y4NGNHXsck4cwDWyQrDocLmdE0hS914lO4TIz4rm6MnRH7oylDn3PA+PnzOOX7E/mnCGYdHONAGUlJ42GNVptZ4dtr6d0HpL0b62CffOGM5Ma83KnYnl6ABNQhYyO4VAK9lzhnXUKaSUvaPzekxwFu51ybOl/H9mHq7Q0YAd3RjICFBoXKomzOQ/GPTwIDAQAB",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1:8777/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["https://mail.google.com/*"], "js": ["content.js"], "run_at": "document_idle" }
+  ]
+}

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -88,7 +89,9 @@ PORT = 8777
 # allowlisted extension origin, if one is configured) may call it. The Host check stops
 # DNS-rebinding pages that resolve their own name to 127.0.0.1.
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
-EXTENSION_ORIGINS = {o for o in os.environ.get("ELDERSHIELD_ALLOWED_ORIGINS", "").split(",") if o}
+GMAIL_EXTENSION_ORIGIN = "chrome-extension://cafpgeefdbbgfbbjgmplcempolghagok"   # fixed by the key in extension/manifest.json
+EXTENSION_ORIGINS = {GMAIL_EXTENSION_ORIGIN} | {
+    o for o in os.environ.get("ELDERSHIELD_ALLOWED_ORIGINS", "").split(",") if o}
 ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS} | EXTENSION_ORIGINS
 
 # Senior override: a CHALLENGE can be released at once; an INTERCEPT only after a cooling-off
@@ -810,17 +813,39 @@ def _decide(score: int) -> str:
     return "INTERCEPT" if score >= 70 else ("CHALLENGE" if score >= 40 else "ALLOW")
 
 
+def _device_reasons(device: dict[str, Any]) -> list[str]:
+    reasons = []
+    if device.get("remote_access"):
+        reasons.append(f"a remote-control app ({', '.join(device['remote_access'])}) is running on this computer")
+    elif device.get("remote_access_earlier"):
+        reasons.append(f"a remote-control app ({', '.join(device['remote_access_earlier'])}) "
+                       "was running on this computer earlier today")
+    if device.get("call_app"):
+        reasons.append(f"you're on a {device['call_app']} call right now")
+    return reasons
+
+
 def score_causality(action: Action, triggers: list[Trigger],
                     long_con: Optional[dict[str, Any]] = None,
                     provenance_matched: bool = False,
-                    watch_matches: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+                    watch_matches: Optional[list[dict[str, Any]]] = None,
+                    device: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """
     Deterministic, sub-millisecond, authoritative. Evaluates hot window, cold grooming,
-    payment-detail provenance, and dynamic watchlist items.
+    payment-detail provenance, dynamic watchlist items, and what the device sensor sees now.
     """
     long_con = long_con or {}
     watch_matches = watch_matches or []
-    base: dict[str, int] = {"action_risk": ACTION_RISK.get(action.action_type, 5)}
+    device = device or {}
+    device_comp: dict[str, int] = {}
+    if device.get("call_app"):
+        device_comp["live_call"] = 15
+    if device.get("remote_access"):
+        device_comp["remote_access"] = 30          # someone else can control this computer right now
+    elif device.get("remote_access_earlier"):
+        device_comp["remote_access_earlier"] = 15  # scammers often disconnect just before the transfer
+    device_reasons = _device_reasons(device)
+    base: dict[str, int] = {"action_risk": ACTION_RISK.get(action.action_type, 5), **device_comp}
     if action.new_payee:
         base["new_payee"] = 10
     if provenance_matched:
@@ -862,7 +887,7 @@ def score_causality(action: Action, triggers: list[Trigger],
         if stale:
             comp["coached_story_match_long_con"] = 40
         comp.update(lc_component)
-        if len(comp) == len(base) and not provenance_matched and not watch_matches:
+        if len(comp) == len(base) and not provenance_matched and not watch_matches and not device_comp:
             return {"causality_score": 0, "decision": "ALLOW", "path": "none",
                     "reason": "No coercion signal linked to this action.",
                     "matched_trigger": None, "components": {}}
@@ -874,6 +899,7 @@ def score_causality(action: Action, triggers: list[Trigger],
         reasons = []
         if stale:
             reasons.append("the reason you typed matches a story someone told you to use earlier this week")
+        reasons += device_reasons
         if provenance_matched:
             reasons.append("payment details were sent to you recently by an untrusted contact")
         for wm in watch_matches:
@@ -885,7 +911,9 @@ def score_causality(action: Action, triggers: list[Trigger],
             dec = "INTERCEPT"
         elif "watchlist_reality_check" in comp and dec == "ALLOW":
             dec = "CHALLENGE"
-        return {"causality_score": score, "decision": dec, "path": "cold" if stale or lc_component else "watchlist",
+        path = ("cold" if stale or lc_component else "watchlist" if watch_matches
+                else "provenance" if provenance_matched else "device")
+        return {"causality_score": score, "decision": dec, "path": path,
                 "reason": "; ".join(reasons) or "watchlist or long-con condition triggered", "matched_trigger": None,
                 "latency_s": None, "components": comp}
 
@@ -895,6 +923,7 @@ def score_causality(action: Action, triggers: list[Trigger],
         reasons.append("the reason you typed matches a story someone coached you to tell")
     elif "coached_story_match_long_con" in c:
         reasons.append("the reason you typed matches a story someone told you to use earlier this week")
+    reasons += device_reasons
     if provenance_matched:
         reasons.append("payment details were sent to you recently by an untrusted contact")
     for wm in watch_matches:
@@ -902,7 +931,7 @@ def score_causality(action: Action, triggers: list[Trigger],
     seen = [HUMAN_SIGNAL[k] for k in t.signals if k in HUMAN_SIGNAL and k != "voice_session"]
     if seen:
         reasons.append("a message a few minutes ago showed " + ", ".join(seen))
-    if t.signals.get("voice_session"):
+    if t.signals.get("voice_session") and not device.get("call_app"):
         reasons.append("you're on a live call right now")
 
     dec = _decide(best["score"])
@@ -1590,6 +1619,71 @@ class ScenarioReplay:
 
 
 # --------------------------------------------------------------------------- #
+# Device context  (what device_watch.py sees on this computer right now)
+# --------------------------------------------------------------------------- #
+
+DEVICE_REPORT_TTL_S = 6                           # the sensor reports every 2 s
+REMOTE_ACCESS_MEMORY_S = 24 * 3600
+
+
+class DeviceContext:
+    """The sensor's latest report (a live call, remote-control apps running) plus a memory of
+    remote-control apps, because scammers often disconnect just before the transfer. Reports
+    expire, so a sensor that stops reporting never leaves a stale 'call in progress' behind."""
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS remote_access_seen (name TEXT PRIMARY KEY, last_seen REAL NOT NULL)")
+        self.conn.commit()
+        self._lock = Lock()
+        self.report: dict[str, Any] = {}
+        self.reported_at = 0.0
+        self.alerts: list[dict[str, Any]] = []
+        self._alert_ids = itertools.count(1)       # never reused, so the sensor's cursor stays valid
+
+    def update(self, report: dict[str, Any]) -> None:
+        now = now_ts()
+        with self._lock:
+            self.report, self.reported_at = report, now
+            for name in report["remote_access"]:
+                self.conn.execute("INSERT OR REPLACE INTO remote_access_seen VALUES (?, ?)", (name, now))
+            self.conn.commit()
+
+    def snapshot(self) -> dict[str, Any]:
+        now = now_ts()
+        with self._lock:
+            live = self.report if now - self.reported_at < DEVICE_REPORT_TTL_S else {}
+            seen = [r[0] for r in self.conn.execute(
+                "SELECT name FROM remote_access_seen WHERE last_seen >= ? ORDER BY name",
+                (now - REMOTE_ACCESS_MEMORY_S,))]
+        running = live.get("remote_access", [])
+        return {
+            "sensor_live": bool(live),
+            "call_app": live.get("call_app"),
+            "remote_access": running,
+            "remote_access_earlier": [n for n in seen if n not in running],
+            "private_window": bool(live.get("private_window")),
+        }
+
+    def push_alert(self, title: str, body: str) -> None:
+        with self._lock:
+            self.alerts = (self.alerts + [{"id": next(self._alert_ids), "title": title, "body": body,
+                                           "ts": now_ts()}])[-20:]
+
+    def alerts_after(self, after: int) -> list[dict[str, Any]]:
+        """Only recent ones: a sensor that starts late must not pop up yesterday's warning."""
+        cutoff = now_ts() - 30
+        with self._lock:
+            return [a for a in self.alerts if a["id"] > after and a["ts"] >= cutoff]
+
+    def clear(self) -> None:
+        with self._lock:
+            self.alerts.clear()
+            self.conn.execute("DELETE FROM remote_access_seen")
+            self.conn.commit()
+
+
+# --------------------------------------------------------------------------- #
 # App wiring & State Singletons
 # --------------------------------------------------------------------------- #
 
@@ -1615,6 +1709,7 @@ DEVICE = DeviceIdentity()
 CASE_MANAGER = CaseManager()
 INVESTIGATOR = ClaudeInvestigator(CASE_MANAGER)
 REPLAY_ENGINE = ScenarioReplay(INVESTIGATOR)
+DEVICE_CTX = DeviceContext()
 RECENT_ACTIONS: dict[str, dict[str, Any]] = {}   # action_id -> fingerprint + decision, for overrides
 
 
@@ -1623,6 +1718,7 @@ def _clear_all() -> None:
     ENTITIES.conn.execute("DELETE FROM entities")
     ENTITIES.conn.commit()
     CASE_MANAGER.clear()
+    DEVICE_CTX.clear()
     RECENT_ACTIONS.clear()
 
 
@@ -1667,6 +1763,12 @@ class OverrideIn(BaseModel):
     reason: str = Field("Verified with family member", max_length=200)
 
 
+class DeviceReport(BaseModel):
+    call_app: Optional[str] = Field(None, max_length=40)       # set only while a call is live
+    remote_access: list[str] = Field(default_factory=list, max_length=10)
+    private_window: bool = False                                # sensor can show the capture-proof warning
+
+
 class InvestigateIn(BaseModel):
     pending_action: Optional[PendingActionSummary] = None
 
@@ -1695,6 +1797,8 @@ def health() -> dict[str, Any]:
 
 @app.post("/ingest/trigger")
 def ingest_trigger(t: TriggerIn) -> dict[str, Any]:
+    if DEVICE_CTX.snapshot()["call_app"]:            # a message read during a live call counts as one
+        t = t.model_copy(update={"has_voice_session": True})
     return _ingest(t, now_ts())
 
 
@@ -1753,7 +1857,19 @@ def _ingest(t: TriggerIn, ts: float) -> dict[str, Any]:
         "entity": entity,
         "case_id": case["case_id"],
         "obs_id": obs_id,
+        "is_threat": cls["is_threat"],
+        "explanation": _explain(cls, san["anomalies"]),
     }
+
+
+def _explain(cls: dict[str, Any], anomalies: list[dict[str, Any]]) -> list[str]:
+    """Plain-language reasons for the senior, from fixed wording only."""
+    reasons = [HUMAN_SIGNAL[k] for k in cls["signals"] if k in HUMAN_SIGNAL and k != "voice_session"]
+    if cls["coached_phrases"]:
+        reasons.append("instructions on what to tell your bank")
+    if any(a["type"] == "hidden_llm_injection" for a in anomalies):
+        reasons.append("hidden text meant to fool safety tools")
+    return reasons
 
 
 @app.post("/evaluate/action")
@@ -1814,12 +1930,14 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
         "coached_phrases": GRAPH.coached_phrases_since(since),
         "financial_stage_entities": len(ENTITIES.at_stage("financial_request", since) & risky),
     }
+    device = DEVICE_CTX.snapshot()
     core = score_causality(
         action=action,
         triggers=triggers,
         long_con=long_con,
         provenance_matched=prov_matched,
-        watch_matches=watch_matches
+        watch_matches=watch_matches,
+        device=device,
     )
     mt = next((x for x in triggers if x.id == core["matched_trigger"]), None)
 
@@ -1843,8 +1961,16 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
         whisper = build_whisper(core)
 
     # The stall is for an onlooker; with no live call or remote session there is nobody to stall.
-    someone_watching = bool(mt and {"voice_session", "tech_support"} & mt.signals.keys())
+    someone_watching = bool(device["call_app"] or device["remote_access"]
+                            or (mt and {"voice_session", "tech_support"} & mt.signals.keys()))
     decoy = build_decoy() if core["decision"] == "INTERCEPT" and someone_watching else None
+    # While someone may be watching, the truth goes to a window screen sharing can't see and the
+    # page shows only the stall. Releasing the payment waits until nobody is watching.
+    private_overlay = decoy is not None and device["private_window"]
+    if private_overlay:
+        DEVICE_CTX.push_alert("Your money has not been sent.",
+                              whisper.replace("Your money has not been sent. ", "", 1)
+                              + " The other person sees a fake “processing” screen, so they'll keep waiting.")
     RECENT_ACTIONS[action.id] = {"fingerprint": fingerprint, "decision": core["decision"]}
     while len(RECENT_ACTIONS) > 200:
         RECENT_ACTIONS.pop(next(iter(RECENT_ACTIONS)))
@@ -1874,6 +2000,7 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
         "llm_enriched": llm_used,
         "provenance_matched": prov_matched,
         "watchlist_hits": len(watch_matches),
+        "private_overlay": private_overlay,
         "legacy_url_scanner": {"verdict": "100% SAFE", "basis": "official domain / valid TLS"},
     }
 
@@ -2038,6 +2165,19 @@ def schemas_v3() -> dict[str, Any]:
     return schemas(v3=True)
 
 
+@app.post("/device/context")
+def device_context(r: DeviceReport) -> dict[str, Any]:
+    """device_watch.py reports what it sees every couple of seconds."""
+    DEVICE_CTX.update(r.model_dump())
+    return {"ok": True}
+
+
+@app.get("/device/alerts")
+def device_alerts(after: int = 0) -> list[dict[str, Any]]:
+    """Private warnings for device_watch.py to show in its capture-proof window."""
+    return DEVICE_CTX.alerts_after(after)
+
+
 @app.get("/state")
 def state() -> dict[str, Any]:
     return {
@@ -2045,6 +2185,7 @@ def state() -> dict[str, Any]:
         "entities": ENTITIES.all(),
         "cases": CASE_MANAGER.all_cases(),
         "watchlist": CASE_MANAGER.get_active_watch_items(),
+        "device": DEVICE_CTX.snapshot(),
     }
 
 

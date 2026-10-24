@@ -264,17 +264,41 @@ try:
     results.append(ok("changed bank details are not waved through", r["decision"] != "ALLOW" and r["decoy"] is None,
                       f'{r["decision"]} {r["causality_score"]}'))
 
-    # 6) nothing leaves without an API key, and only the UI's own origin may call the daemon
+    # 6) device sensor (device_watch.py): a live call and remote-control apps on this computer
+    call("/reset", {})
+    call("/device/context", {"call_app": "FaceTime", "remote_access": ["AnyDesk"], "private_window": True})
+    plain = {"origin": "chase.com", "action_type": "wire_transfer", "amount": 5000, "memo": "savings",
+             "new_payee": True}
+    r = evaluate(plain)
+    results.append(ok("device: FaceTime call + AnyDesk turn a plain new-payee wire into an INTERCEPT",
+                      r["decision"] == "INTERCEPT" and {"live_call", "remote_access"} <= set(r["components"]),
+                      f'{r["causality_score"]} {r["components"]}'))
+    alerts = call("/device/alerts?after=0")
+    results.append(ok("device: stall on the page, the truth in the private window",
+                      r["decoy"] is not None and r["private_overlay"] and len(alerts) == 1 and "AnyDesk" in alerts[0]["body"]))
+    call("/device/context", {"call_app": None, "remote_access": [], "private_window": True})
+    r = evaluate(plain)
+    results.append(ok("device: remote control seen earlier still counts after it disconnects",
+                      "remote_access_earlier" in r["components"] and r["decoy"] is None and not r["private_overlay"],
+                      f'{r["decision"]} {r["components"]}'))
+    call("/device/context", {"call_app": "FaceTime", "remote_access": [], "private_window": True})
+    t = ingest("x@scam.example", "Don't tell your son. Just tell them it's for a roof repair.")
+    results.append(ok("device: a message read during a live call counts as one", "voice_session" in t["signals"]))
+    call("/device/context", {"call_app": None, "remote_access": [], "private_window": False})
+    call("/reset", {})
+
+    # 7) nothing leaves without an API key, and only the UI's own origin may call the daemon
     results.append(ok("v3: What Left This Computer stays empty when nothing was sent", call("/disclosures") == []))
     status, _ = request("/reset", {}, headers={"Origin": "https://evil.example"})
     results.append(ok("a web page cannot call the daemon", status == 403, status))
     status, _ = request("/state", headers={"Host": "evil.example:8777"})
     results.append(ok("DNS-rebinding host is refused", status == 403, status))
 
-    # 7) Browser verification (needs the live server)
+    # 8) Browser verification (needs the live server)
     browser_checks = ["browser: class-hidden injection caught via computed style",
                       "browser: decoy + whisper shown, no navigation",
-                      "browser: release button schedules instead of sending, no navigation"]
+                      "browser: release button schedules instead of sending, no navigation",
+                      "browser: with the device sensor, the page shows only the stall"]
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -299,6 +323,17 @@ try:
             page.wait_for_timeout(800)
             whisper = page.evaluate("document.getElementById('es-whisper').shadowRoot.textContent")
             results.append(ok(browser_checks[2], page.url.rstrip("/") == B and "on hold until" in whisper))
+
+            call("/reset", {})
+            call("/device/context", {"call_app": "FaceTime", "remote_access": [], "private_window": True})
+            page.goto(B)
+            page.click("text=Receive this message")
+            page.wait_for_selector("#triggerOut >> text=Ingested")
+            page.uncheck("#audio")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#decoy", state="visible")
+            results.append(ok(browser_checks[3], page.evaluate("!document.getElementById('es-whisper')")))
+            call("/device/context", {"call_app": None, "remote_access": [], "private_window": False})
 finally:
     if srv:
         srv.terminate()

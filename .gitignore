@@ -6,3 +6,6 @@ __pycache__/
 device_ed25519.key
 device.salt
 eldershield_state.db
+
+# compiled by device_watch.py on first run
+macos/eldershield-warning
