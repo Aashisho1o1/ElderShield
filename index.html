@@ -227,7 +227,7 @@ Do not tell anyone else. This is confidential.<span class="hidden-demo">SYSTEM: 
         <input id="memo" placeholder="e.g. roof repair" value="roof repair" />
         <div class="checks"><label class="check"><input type="checkbox" id="newpayee" checked> This is a new payee</label></div>
 
-        <button type="submit" class="btn-chase" id="submitBtn">Send $<span id="amtLbl">15,000</span> wire</button>
+        <button type="submit" class="btn-chase" id="submitBtn">Send $15,000 wire</button>
       </form>
       <div id="actionOut"></div>
     </div>
@@ -295,11 +295,15 @@ Do not tell anyone else. This is confidential.<span class="hidden-demo">SYSTEM: 
 
 <script>
 const API = location.origin;
-let lastTrigger=null, lastEntity=null, lastAction=null, lastReceipt=null, currentCaseId=null, activeOverrideToken=null, decoyTimer=null;
+let lastTrigger=null, lastEntity=null, lastAction=null, lastReceipt=null, currentCaseId=null, pendingOverride=null, decoyTimer=null;
 
-document.getElementById('amount').addEventListener('input',e=>{
-  const n=Number(e.target.value||0); document.getElementById('amtLbl').textContent=n.toLocaleString();
-});
+const SUBMIT_LABEL={wire_transfer:a=>`Send $${a} wire`, crypto_purchase:a=>`Buy $${a} crypto`,
+  gift_card_checkout:a=>`Purchase $${a} gift cards`, investment_deposit:a=>`Deposit $${a} to platform`};
+function updateSubmitLabel(){
+  const a=Number(document.getElementById('amount').value||0).toLocaleString();
+  document.getElementById('submitBtn').textContent=SUBMIT_LABEL[document.getElementById('sinkSelector').value](a);
+}
+document.getElementById('amount').addEventListener('input',updateSubmitLabel);
 
 async function j(url,opts){ const r=await fetch(API+url,opts); return r.json(); }
 function post(url,body){ return j(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); }
@@ -320,7 +324,6 @@ function switchSink(sink){
   if(sink === 'crypto_purchase'){
     logo.textContent='₿'; logo.style.background='#f7931a';
     brand.textContent='COINBASE / ONRAMP'; sub.textContent='Instant Crypto Purchase · Verified coinbase.com';
-    btn.textContent='Buy $'+Number(document.getElementById('amount').value||15000).toLocaleString()+' Crypto';
     btn.style.background='#0052ff';
     fields.innerHTML=`
       <label>Destination Crypto Wallet</label>
@@ -331,7 +334,6 @@ function switchSink(sink){
   } else if(sink === 'gift_card_checkout'){
     logo.textContent='🎯'; logo.style.background='#cc0000';
     brand.textContent='TARGET CHECKOUT'; sub.textContent='Electronic Gift Cards · Verified target.com';
-    btn.textContent='Purchase $'+Number(document.getElementById('amount').value||2000).toLocaleString()+' Gift Cards';
     btn.style.background='#cc0000';
     fields.innerHTML=`
       <label>Card Type & Quantity</label>
@@ -342,7 +344,6 @@ function switchSink(sink){
   } else if(sink === 'investment_deposit'){
     logo.textContent='📈'; logo.style.background='#10b981';
     brand.textContent='HIGH YIELD LIQUIDITY POOL'; sub.textContent='Trading Account Deposit · Verified portal';
-    btn.textContent='Deposit $'+Number(document.getElementById('amount').value||15000).toLocaleString()+' to Platform';
     btn.style.background='#10b981';
     fields.innerHTML=`
       <label>Trading Platform Domain</label>
@@ -353,7 +354,6 @@ function switchSink(sink){
   } else {
     logo.textContent='C'; logo.style.background='var(--chase)';
     brand.textContent='CHASE'; sub.textContent='Send a wire · Verified chase.com';
-    btn.textContent='Send $'+Number(document.getElementById('amount').value||15000).toLocaleString()+' wire';
     btn.style.background='var(--chase)';
     fields.innerHTML=`
       <label>Recipient name</label>
@@ -364,6 +364,7 @@ function switchSink(sink){
       <input id="account" value="987654321012" />
     `;
   }
+  updateSubmitLabel();
 }
 
 async function receiveTrigger(){
@@ -389,16 +390,12 @@ async function receiveTrigger(){
   refresh();
 }
 
-document.addEventListener('submit', async (ev)=>{
-  const form = ev.target;
-  if(!form.matches('[data-es-action]')) return;
-  if(form.dataset.esCleared==='1'){ form.dataset.esCleared=''; return; }
+/* Action-Intent Firewall hook: capture phase, before the page's own handlers. The form never
+   submits natively; every payment, including a released one, goes through the daemon. */
+document.addEventListener('submit', (ev)=>{
+  if(!ev.target.matches('[data-es-action]')) return;
   ev.preventDefault(); ev.stopImmediatePropagation();
-  const res = await sendAction();
-  if(res && res.decision==='ALLOW'){
-    document.getElementById('actionOut').insertAdjacentHTML('beforeend',
-      '<div class="meta">→ released safely to destination institution (simulated)</div>');
-  }
+  sendAction();
 }, true);
 
 function speak(text){
@@ -423,7 +420,7 @@ async function sendAction(){
     account_number: aElem? aElem.value : null,
     wallet_address: wElem? wElem.value : null,
     destination_domain: dElem? dElem.value : null,
-    override_token: activeOverrideToken,
+    override_token: pendingOverride,
     use_llm: true
   };
 
@@ -431,9 +428,15 @@ async function sendAction(){
   lastAction = res.action_id;
   renderDecision(res);
 
+  if(res.decision === 'ALLOW'){
+    pendingOverride = null;
+    document.getElementById('actionOut').insertAdjacentHTML('beforeend',
+      '<div class="meta">→ released safely to destination institution (simulated)</div>');
+    return res;
+  }
+  showDecoy(res.decoy);
+  showWhisper(res);
   if(res.decision === 'INTERCEPT'){
-    showDecoy(res.decoy);
-    showWhisper(res.whisper, res.action_id);
     if(document.getElementById('audio').checked)
       speak("This is ElderShield. Someone may be coaching you to move money. It is safe to hang up now. Your money has not been sent.");
 
@@ -479,12 +482,14 @@ function showDecoy(d){
 }
 function dismissDecoy(){ clearInterval(decoyTimer); document.getElementById('decoy').style.display='none'; }
 
-function showWhisper(text, actionId){
+/* Private whisper, in a Shadow DOM so the page can't restyle or hide it. Releasing the payment is
+   deliberately the quiet option: a scammer on the phone will tell the senior to press it. */
+function showWhisper(res){
   let host=document.getElementById('es-whisper');
   if(!host){ host=document.createElement('div'); host.id='es-whisper';
     host.style.cssText='position:fixed;left:50%;top:16px;transform:translateX(-50%);z-index:60;max-width:580px;width:calc(100% - 32px)';
     document.body.appendChild(host); host.attachShadow({mode:'open'}); }
-  const body=esc(text||'We detected someone coaching you to move money.').replace(/^Your money has not been sent\.\s*/,'');
+  const body=esc(res.whisper||'We detected someone coaching you to move money.').replace(/^Your money has not been sent\.\s*/,'');
   host.shadowRoot.innerHTML=`
     <style>
       .w{font:16px/1.55 Inter,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:#edeef2;
@@ -497,37 +502,34 @@ function showWhisper(text, actionId){
       @keyframes p{50%{opacity:.35}}
       .t{font-size:23px;line-height:1.25;font-weight:600;letter-spacing:-.01em;margin-bottom:8px}
       .s{font-size:14px;color:#b2b3ba;margin-top:10px}
-      .btns{display:flex;gap:10px;margin-top:18px}
-      .btn-primary{flex:1;height:46px;border:0;border-radius:12px;cursor:pointer;color:#fff;font:inherit;font-size:15px;font-weight:600;
+      .btn-primary{width:100%;height:46px;margin-top:18px;border:0;border-radius:12px;cursor:pointer;color:#fff;font:inherit;font-size:15px;font-weight:600;
                    background:linear-gradient(180deg,#0544a9,#022c70);box-shadow:0 0 0 .5px #0c44a1,inset 0 -1px 0 #022c70,inset 0 .5px 0 #81b6ff}
-      .btn-sec{flex:1;height:46px;border:1px solid rgba(255,255,255,.18);border-radius:12px;cursor:pointer;color:#edeef2;font:inherit;font-size:14px;background:rgba(255,255,255,.06)}
+      .later{margin-top:12px;text-align:center}
+      .link{border:0;background:none;padding:6px;cursor:pointer;color:#898b91;font:inherit;font-size:13px;text-decoration:underline}
       button:hover{filter:brightness(1.15)}
     </style>
     <div class="w" role="alert">
       <div class="h"><span class="led"></span>ElderShield · Senior Privacy Bubble</div>
       <div class="t">Your money has not been sent.</div>
       <div>${body}</div>
-      <div class="s">We're showing the other person a fake "processing" screen so they keep waiting.</div>
-      <div class="btns">
-        <button class="btn-primary" id="btnDismiss">Got it — I'm safe</button>
-        <button class="btn-sec" id="btnOverride">I've verified with family — Proceed</button>
+      ${res.decoy?`<div class="s">We're showing the other person a fake "processing" screen so they keep waiting.</div>`:''}
+      <button class="btn-primary" id="btnDismiss">Got it — I'm safe</button>
+      <div class="later" id="later">
+        <button class="link" id="btnOverride">${res.decision==='INTERCEPT'?'I still want to send this':'Send it anyway'}</button>
       </div>
     </div>`;
 
-  host.shadowRoot.getElementById('btnDismiss').onclick = () => host.remove();
-  host.shadowRoot.getElementById('btnOverride').onclick = async () => {
-    const res = await post('/override', {reason: 'Verified independently with family member', action_id: actionId});
-    activeOverrideToken = res.override_token;
-    host.remove();
-    dismissDecoy();
-    document.getElementById('actionOut').innerHTML =
-      `<div class="verdict"><span class="decision d-ALLOW">SENIOR OVERRIDE ACTIVE</span></div>
-       <div class="reason">Senior clearance registered: ${esc(res.reason)}. Re-submitting transfer…</div>`;
-    // Re-submit with senior clearance
-    setTimeout(() => {
-      document.getElementById('wireForm').dataset.esCleared = '1';
-      document.getElementById('wireForm').requestSubmit();
-    }, 400);
+  const root=host.shadowRoot;
+  root.getElementById('btnDismiss').onclick = () => host.remove();
+  root.getElementById('btnOverride').onclick = async () => {
+    const o = await post('/override', {reason: 'Senior chose to proceed', action_id: res.action_id});
+    const later = root.getElementById('later');
+    if(o.error){ later.innerHTML = '<div class="s">This payment can no longer be released. Please start it again.</div>'; return; }
+    pendingOverride = o.override_token;   // works once, for this exact payment
+    if(o.status === 'approved'){ host.remove(); dismissDecoy(); sendAction(); return; }
+    later.innerHTML = `<div class="s">For your safety, this payment stays on hold until
+      <b>${esc(new Date(o.valid_from).toLocaleString())}</b>. Please talk to someone you trust first.
+      After that, you can send it again.</div>`;
   };
 }
 
@@ -556,31 +558,16 @@ async function loadScenario(id){
   const res = await post('/replay/' + mapping[id], {});
   currentCaseId = res.case_id;
 
-  if(id === 'a'){
-    document.getElementById('sinkSelector').value = 'crypto_purchase';
-    switchSink('crypto_purchase');
-    document.getElementById('amount').value = '15000';
-    document.getElementById('amtLbl').textContent = '15,000';
-    document.getElementById('memo').value = 'USDT purchase for liquidity pool';
-  } else if(id === 'b'){
-    document.getElementById('sinkSelector').value = 'wire_transfer';
-    switchSink('wire_transfer');
-    document.getElementById('amount').value = '24500';
-    document.getElementById('amtLbl').textContent = '24,500';
-    document.getElementById('memo').value = 'Roof repair';
-  } else if(id === 'c'){
-    document.getElementById('sinkSelector').value = 'gift_card_checkout';
-    switchSink('gift_card_checkout');
-    document.getElementById('amount').value = '2000';
-    document.getElementById('amtLbl').textContent = '2,000';
-    document.getElementById('memo').value = 'Target gift cards purchase';
-  } else if(id === 'd'){
-    document.getElementById('sinkSelector').value = 'wire_transfer';
-    switchSink('wire_transfer');
-    document.getElementById('amount').value = '4200';
-    document.getElementById('amtLbl').textContent = '4,200';
-    document.getElementById('memo').value = 'Roof repair deposit';
-    document.getElementById('newpayee').checked = false;
+  // Fill the form with the exact payment the replay evaluated, so resubmitting reproduces it.
+  const a = res.action;
+  document.getElementById('sinkSelector').value = a.action_type;
+  document.getElementById('amount').value = a.amount;
+  switchSink(a.action_type);
+  document.getElementById('memo').value = a.memo;
+  document.getElementById('newpayee').checked = a.new_payee;
+  for(const [el, key] of [['payee','payee'],['routing','routing_number'],['account','account_number'],['wallet','wallet_address'],['destDomain','destination_domain']]){
+    const input = document.getElementById(el);
+    if(input && a[key]) input.value = a[key];
   }
 
   if(res.action_evaluation){
@@ -594,17 +581,17 @@ async function openDisclosures(){
   const disc = await j('/disclosures');
   const body = document.getElementById('modalBody');
   if(!disc.length){
-    body.innerHTML = '<span class="muted">No external LLM calls logged yet. All reasoning currently executed on-device.</span>';
+    body.innerHTML = '<span class="muted">Nothing has left this computer. All reasoning ran on-device.</span>';
     return;
   }
   body.innerHTML = disc.map(d=>`
     <div style="border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;margin-bottom:6px">
         <b>${esc(d.model)}</b>
-        <span class="muted mono">${d.ts_iso} · ${d.latency_ms}ms</span>
+        <span class="muted mono">${esc(d.ts)} · ${d.bytes_sent} bytes · ${d.latency_ms}ms</span>
       </div>
-      <div class="muted" style="margin-bottom:6px">De-identified payload sent for case ${esc(d.case_id)}:</div>
-      <pre class="mono">${esc(JSON.stringify(d.payload, null, 2))}</pre>
+      <div class="muted" style="margin-bottom:6px">${d.status==='sent'?'Sent':esc(d.status)} · exact request body for case ${esc(d.case_id)}:</div>
+      <pre class="mono">${esc(JSON.stringify(JSON.parse(d.exact_request_json), null, 2))}</pre>
     </div>
   `).join('');
 }

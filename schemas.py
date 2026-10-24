@@ -170,9 +170,9 @@ class CaseFile(BaseModel):
     investigator_runs: int = 0
 
 
+# The kinds the server's policy code can enforce: one site, or one whole kind of payment.
 WatchKind = Literal[
-    "payee_identifier", "destination_domain", "amount_range",
-    "memo_phrase", "withdrawal_fee_request", "gift_card_checkout", "remote_access_install"
+    "destination_domain", "wire_transfer", "crypto_purchase", "gift_card_checkout", "investment_deposit"
 ]
 WatchAction = Literal["note", "reality_check", "hold_and_explain"]
 
@@ -201,8 +201,8 @@ class TimelineEvent(BaseModel):
 
 
 class PendingActionSummary(BaseModel):
-    sink: str
-    amount: Optional[str] = None
+    sink: Literal["wire_transfer", "crypto_purchase", "gift_card_checkout", "investment_deposit"]
+    amount: Optional[float] = None
     destination: Optional[str] = None
 
 
@@ -210,7 +210,7 @@ class InvestigatorRequest(BaseModel):
     """The strictly de-identified case summary sent to the cloud model."""
     task: str = "assess_case"
     case_ref: str
-    user_baseline: dict[str, Any]
+    user_baseline: Optional[dict[str, Any]] = None   # only when computed from real history
     timeline: list[TimelineEvent]
     pending_action: Optional[PendingActionSummary] = None
     current_watch_items: int = 0
@@ -237,12 +237,13 @@ class InvestigatorResponse(BaseModel):
 
 
 class DisclosureLog(BaseModel):
-    """Tamper-evident log of every outbound request that left the device."""
+    """Log of every outbound request, written before it is sent. Local-only runs add no entry."""
     disclosure_id: str = Field(pattern=r"^disc_[0-9a-f]{6,}$")
     ts: str
     case_id: str
     bytes_sent: int
     exact_request_json: str
     model: str
+    status: str = Field(description="'sending', 'sent', or 'failed: <reason>' (a failed call may still have reached the API)")
     latency_ms: float
 

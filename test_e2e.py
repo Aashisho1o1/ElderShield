@@ -2,15 +2,21 @@
 End-to-end check for ElderShield v3.
 Supports both live socket test (when port 8777 is bindable)
 and robust in-process TestClient execution (inside sandboxed environments).
+Browser checks need the live server; in-process runs report them as SKIPPED, never as passed.
 """
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
+
+# Short cooling-off so the override test can watch a hold expire. Set before the server starts.
+os.environ["ELDERSHIELD_OVERRIDE_DELAY_S"] = "2"
 
 from schemas import (
     CrossTabCausalGraphState,
@@ -40,6 +46,7 @@ srv = None
 def can_bind_port():
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)   # as uvicorn does; else TIME_WAIT looks "busy"
     try:
         s.bind(("127.0.0.1", 8777))
         s.close()
@@ -61,13 +68,30 @@ def start_server():
                 return p
             except Exception:
                 time.sleep(0.1)
+    print("NOTE: port 8777 unavailable, running in-process (browser checks will be skipped)")
     from fastapi.testclient import TestClient
     import importlib
     import server
     importlib.reload(server)
-    client = TestClient(server.app)
+    client = TestClient(server.app, base_url=B)   # the daemon only answers to its own host
     srv = None
     return None
+
+
+def request(path, body=None, headers=None):
+    """Returns (status, json) for any request, including refused ones."""
+    method = "GET" if body is None else "POST"
+    headers = {"Content-Type": "application/json", **(headers or {})}
+    if client is not None:
+        r = client.request(method, path, headers=headers, content=None if body is None else json.dumps(body))
+        return r.status_code, r.json()
+    req = urllib.request.Request(B + path, data=None if body is None else json.dumps(body).encode(),
+                                 headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
 
 
 def call_direct(path, body=None):
@@ -78,48 +102,38 @@ def call_direct(path, body=None):
         return json.loads(r.read())
 
 
-def call(path, body=None, method=None):
-    if method is None:
-        method = "POST" if body is not None else "GET"
-    if client is not None:
-        if method == "GET":
-            r = client.get(path)
-        elif method == "POST":
-            r = client.post(path, json=body or {})
-        return r.json()
-    return call_direct(path, body)
+def call(path, body=None):
+    return request(path, body)[1]
+
+
+def evaluate(action, **extra):
+    return call("/evaluate/action", {"tab_id": "tabB", "use_llm": False, **action, **extra})
 
 
 def wire(memo, new_payee=True, routing="021000021", account="987654321012"):
-    return call("/evaluate/action", {
-        "tab_id": "tabB",
-        "origin": "chase.com",
-        "action_type": "wire_transfer",
-        "amount": 15000,
-        "memo": memo,
-        "routing_number": routing,
-        "account_number": account,
-        "new_payee": new_payee,
-        "use_llm": False,
-    })
+    return evaluate({"origin": "chase.com", "action_type": "wire_transfer", "amount": 15000, "memo": memo,
+                     "routing_number": routing, "account_number": account, "new_payee": new_payee})
+
+
+def ingest(sender, content, voice=False):
+    return call("/ingest/trigger", {"tab_id": "tabA", "sender": sender, "content": content, "has_voice_session": voice})
 
 
 def restart_server():
-    global srv, client
+    global srv
     if srv:
         srv.terminate()
         srv.wait()
-        start_server()
-    else:
-        from fastapi.testclient import TestClient
-        import importlib
-        import server
-        importlib.reload(server)
-        client = TestClient(server.app)
+        for _ in range(50):                      # the port is not free the instant the process exits
+            if can_bind_port():
+                break
+            time.sleep(0.1)
+    start_server()
 
 
 ok = lambda name, cond, extra="": print(("PASS " if cond else "FAIL ") + name, extra) or cond
 results = []
+skipped = []
 start_server()
 
 try:
@@ -130,12 +144,7 @@ try:
     results.append(ok("control: clean wire is ALLOWed", r["decision"] == "ALLOW", r["causality_score"]))
 
     # 1) hot path
-    t = call("/ingest/trigger", {
-        "tab_id": "tabA",
-        "sender": "security@chasealerts-verify.com",
-        "content": SCAM,
-        "has_voice_session": True,
-    })
+    t = ingest("security@chasealerts-verify.com", SCAM, voice=True)
     results.append(ok("coached story extracted", t["coached_phrases"] == ["roof repair"]))
     results.append(ok("hidden LLM injection flagged", any(a["type"] == "hidden_llm_injection" for a in t["anomalies"])))
     results.append(ok("v3: case file created on ingest", bool(t.get("case_id"))))
@@ -193,69 +202,108 @@ try:
     results.append(ok("cold path: unrelated memo is not INTERCEPTed", r["decision"] != "INTERCEPT",
                       f'{r["decision"]} {r["causality_score"]}'))
 
-    # 4) v3: Multi-day scenario replay A (Pig Butchering / Crypto Investment)
+    # 4) Multi-day replays, each fed through the real ingest path with back-dated messages
     rep_a = call("/replay/scenario_a", {})
     results.append(ok("v3: Scenario A replay INTERCEPTs crypto purchase",
                       rep_a.get("verified") is True and rep_a.get("action_evaluation", {}).get("decision") == "INTERCEPT"))
 
-    # 5) v3: Multi-day scenario replay B (Safe Account Wire Impersonation)
     rep_b = call("/replay/scenario_b", {})
     results.append(ok("v3: Scenario B replay INTERCEPTs coerced wire",
                       rep_b.get("verified") is True and rep_b.get("action_evaluation", {}).get("decision") == "INTERCEPT"))
 
-    # 6) v3: Multi-day scenario replay C (Tech Support Remote Access)
+    # Scenario B state is live: check what the case store kept and what the override allows.
+    case = call(f"/cases/{rep_b['case_id']}")
+    stored = json.dumps(case)
+    results.append(ok("privacy: no raw payment details stored",
+                      "021000021" not in stored and "987654321012" not in stored))
+    results.append(ok("privacy: snippets are redacted before storage",
+                      any("[number]" in o["redacted_snippet"] for o in case["observations"])))
+    span_days = (case["observations"][-1]["ts"] - case["observations"][0]["ts"]) / 86400
+    results.append(ok("replay keeps the real multi-day timeline", 1.9 < span_days < 2.1, round(span_days, 2)))
+
+    b_action = rep_b["action"]
+    ovr = call("/override", {"action_id": rep_b["action_evaluation"]["action_id"]})
+    results.append(ok("override: an INTERCEPT release is scheduled, not immediate", ovr.get("status") == "scheduled"))
+    tok = ovr["override_token"]
+    results.append(ok("override: blocked during the cooling-off period",
+                      evaluate(b_action, override_token=tok)["decision"] == "INTERCEPT"))
+    other = {"origin": "target.com", "action_type": "gift_card_checkout", "amount": 900, "memo": "", "new_payee": True}
+    results.append(ok("override: token does not release a different payment",
+                      evaluate(other, override_token=tok)["decision"] != "ALLOW"))
+    time.sleep(2.5)
+    released = evaluate(b_action, override_token=tok)
+    results.append(ok("v3: Senior override prevents inescapable intercept loops",
+                      released["decision"] == "ALLOW" and released["path"] == "override"))
+    results.append(ok("override: token is single-use", evaluate(b_action, override_token=tok)["decision"] != "ALLOW"))
+    status, _ = request("/override", {"action_id": "act_unknown"})
+    results.append(ok("override: refused for an unknown payment", status == 404, status))
+
     rep_c = call("/replay/scenario_c", {})
     results.append(ok("v3: Scenario C replay INTERCEPTs gift card checkout",
                       rep_c.get("verified") is True and rep_c.get("action_evaluation", {}).get("decision") == "INTERCEPT"))
+    r = evaluate({"origin": "chase.com", "action_type": "wire_transfer", "amount": 3100, "memo": "property tax"})
+    results.append(ok("watchlist: a gift-card hold does not spill onto wires",
+                      "watchlist_hold" not in r["components"], r["components"]))
 
-    # 7) v3: Multi-day scenario replay D (Legitimate Contractor Control)
     rep_d = call("/replay/scenario_d", {})
     results.append(ok("v3: Scenario D control ALLOWs clean contractor invoice",
-                      rep_d.get("verified") is True and rep_d.get("action_evaluation", {}).get("decision") == "ALLOW"))
+                      rep_d.get("verified") is True and rep_d.get("action_evaluation", {}).get("decision") == "ALLOW",
+                      rep_d.get("action_evaluation", {}).get("components")))
 
-    # 8) v3: Senior clearance override mechanism
-    ovr = call("/override", {"reason": "Verified independently with daughter Sarah", "action_id": r["action_id"]})
-    token = ovr["override_token"]
-    r_ovr = call("/evaluate/action", {
-        "tab_id": "tabB",
-        "origin": "chase.com",
-        "action_type": "wire_transfer",
-        "amount": 15000,
-        "memo": "roof repair",
-        "override_token": token,
-        "use_llm": False,
-    })
-    results.append(ok("v3: Senior override prevents inescapable intercept loops",
-                      r_ovr["decision"] == "ALLOW" and "Senior clearance override active" in r_ovr["reason"]))
+    # 5) false positives and the changed-bank-details scam
+    call("/reset", {})
+    ingest("daughter@gmail.com", "Lunch on Sunday? Love, Sarah")
+    r = wire("car repair", routing=None, account=None)
+    results.append(ok("an ordinary email doesn't make the next payment suspicious", r["decision"] == "ALLOW", r["components"]))
 
-    # 9) v3: Disclosure log verification
-    disclosures = call("/disclosures")
-    results.append(ok("v3: What Left This Computer disclosures logged", len(disclosures) >= 1))
+    call("/reset", {})
+    ingest("mike@bayroofing.com", "Hi, here is the estimate for the roof: $4,200 total.")
+    ingest("mike@bayroofing.com", "Our bank details have changed. Please wire the deposit to routing 026009593, "
+                                  "account 99887766554 instead.")
+    r = wire("roof deposit", routing="026009593", account="99887766554")
+    results.append(ok("changed bank details are not waved through", r["decision"] != "ALLOW" and r["decoy"] is None,
+                      f'{r["decision"]} {r["causality_score"]}'))
 
-    # 10) Browser verification if socket was started
-    if srv:
+    # 6) nothing leaves without an API key, and only the UI's own origin may call the daemon
+    results.append(ok("v3: What Left This Computer stays empty when nothing was sent", call("/disclosures") == []))
+    status, _ = request("/reset", {}, headers={"Origin": "https://evil.example"})
+    results.append(ok("a web page cannot call the daemon", status == 403, status))
+    status, _ = request("/state", headers={"Host": "evil.example:8777"})
+    results.append(ok("DNS-rebinding host is refused", status == 403, status))
+
+    # 7) Browser verification (needs the live server)
+    browser_checks = ["browser: class-hidden injection caught via computed style",
+                      "browser: decoy + whisper shown, no navigation",
+                      "browser: release button schedules instead of sending, no navigation"]
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        sync_playwright = None
+    if not srv or sync_playwright is None:
+        skipped += browser_checks
+    else:
         call("/reset", {})
-        try:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as pw:
-                page = pw.chromium.launch().new_page()
-                page.goto(B)
-                page.click("text=Receive this message")
-                page.wait_for_selector("#triggerOut >> text=Ingested")
-                page.uncheck("#audio")
-                page.click("button[type=submit]")
-                page.wait_for_selector("#decoy", state="visible")
-                whisper = page.evaluate("document.getElementById('es-whisper').shadowRoot.textContent")
-                results.append(ok("browser: class-hidden injection caught via computed style",
-                                  "hidden_llm_injection" in page.inner_text("#triggerOut")))
-                results.append(ok("browser: decoy + whisper shown, no navigation",
-                                  page.url.rstrip("/") == B and "fake" in whisper))
-                page.screenshot(path=str(HERE / "demo_intercept.png"), full_page=True)
-        except Exception as e:
-            print("Browser test skipped (socket unavailable):", e)
+        with sync_playwright() as pw:
+            page = pw.chromium.launch().new_page()
+            page.goto(B)
+            page.click("text=Receive this message")
+            page.wait_for_selector("#triggerOut >> text=Ingested")
+            page.uncheck("#audio")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#decoy", state="visible")
+            whisper = page.evaluate("document.getElementById('es-whisper').shadowRoot.textContent")
+            results.append(ok(browser_checks[0], "hidden_llm_injection" in page.inner_text("#triggerOut")))
+            results.append(ok(browser_checks[1], page.url.rstrip("/") == B and "fake" in whisper))
+            page.screenshot(path=str(HERE / "demo_intercept.png"), full_page=True)
+            page.evaluate("document.getElementById('es-whisper').shadowRoot.getElementById('btnOverride').click()")
+            page.wait_for_timeout(800)
+            whisper = page.evaluate("document.getElementById('es-whisper').shadowRoot.textContent")
+            results.append(ok(browser_checks[2], page.url.rstrip("/") == B and "on hold until" in whisper))
 finally:
     if srv:
         srv.terminate()
 
-print(f"\n{sum(results)}/{len(results)} passed")
+for name in skipped:
+    print("SKIP " + name)
+print(f"\n{sum(results)}/{len(results)} passed" + (f", {len(skipped)} skipped" if skipped else ""))
 sys.exit(0 if all(results) else 1)

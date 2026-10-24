@@ -26,6 +26,27 @@ The demo runs fully without Ollama — the deterministic scorer is authoritative
 stays inside the 250 ms budget; the LLM only refines the whisper text when it's up
 and there's time left in the budget.
 
+| env var | default | what it does |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | unset | enables the cloud case investigator; without it a local rule engine answers and nothing leaves the machine |
+| `ANTHROPIC_MODEL` | `claude-opus-5-5` | model for the investigator |
+| `ELDERSHIELD_OVERRIDE_DELAY_S` | `86400` | cooling-off before an INTERCEPTed payment can be released (set e.g. `10` for a live demo) |
+| `ELDERSHIELD_ALLOWED_ORIGINS` | unset | comma-separated extra origins allowed to call the daemon, e.g. a `chrome-extension://…` id |
+
+### Releasing a paused payment, and who may call the daemon
+
+- **CHALLENGE** → "Send it anyway" releases that payment at once. **INTERCEPT** → "I still want
+  to send this" schedules the release after the cooling-off delay, because a scammer on the
+  phone will simply tell the senior to press the button. The token works once, for that exact
+  payment (kind, site, amount, destination), and every release is recorded.
+- The daemon answers only its own UI: requests with a foreign `Origin` or a non-local `Host`
+  (DNS rebinding) get a 403, so a web page can't read case files, wipe state with `/reset`, or
+  release a payment. `/reset` and `/replay` are demo conveniences; remove them in production.
+- **What leaves the machine:** with an API key set, each investigator call is logged *before* it
+  is sent, with the exact request body, then marked sent or failed (`GET /disclosures`). Snippets
+  are redacted first (numbers, phones, emails, wallets, names); payment details are only ever
+  stored as salted hashes. The model's own wording is never shown to the senior.
+
 ## The demo (one screen, three panels)
 
 1. **Tab A — the scammer.** An email + live-call transcript coaching the senior:
@@ -142,14 +163,20 @@ social-engineering attack occurred — **without** exposing the raw emails or ba
 ## Tests
 
 ```bash
-python test_e2e.py     # starts its own server; needs port 8777 free
+playwright install chromium   # once, for the browser checks
+python test_e2e.py            # starts its own server; needs port 8777 free
 ```
 
-15 checks: clean-wire control, hot-path intercept and latency, plain-language
+38 checks: clean-wire control, hot-path intercept and latency, plain-language
 whisper, receipt verify + tamper rejection, live state validated against
-`schemas.py`, restart rehydration, 3-day cold-path intercept and its control, and a
-real Chromium run proving the `submit` is captured (no navigation), the decoy and
-whisper render, and class-hidden injection is caught via computed style.
+`schemas.py`, restart rehydration, the 3-day cold path and its control, the four
+replays (A–C intercept; D, a first-time contractor paid to the invoice's own account,
+is allowed), the override's cooling-off / binding / single use, no watch-item spill
+across payment kinds, storage privacy, the origin lock, and a real Chromium run
+proving the `submit` is captured (no navigation), the decoy and whisper render, the
+release button schedules instead of sending, and class-hidden injection is caught.
+If port 8777 can't be used, the suite runs in-process and reports the browser checks
+as SKIPPED.
 
 ## Endpoints
 
