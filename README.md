@@ -91,6 +91,15 @@ fits. The verdict sits on the caller's card ("Jev: 97% fraud · a romance scam")
 is attempted, becomes the long-term component of the score with the rule-based ladder as its floor,
 so a Jev outage never weakens the rules. `ELDERSHIELD_ASSESS_EVERY_S` changes the interval.
 
+When that judgment crosses a line during a call, she gets an alert of its own, once per call:
+*"This call fits how romance scams work (96% sure). Daniel has known you 20 days, called 6 times
+this week, calls late at night, asked you to keep things from your family, asked for money on 3
+different days…"* The pattern picks the wording (romance, bank/tech-support, investment,
+family-emergency, or just "a serious concern"); the facts come from the journal. So the scam
+alert no longer depends on a phrase match: Jev also reads through speech-to-text errors ("target
+give cards", "by coin", "any desk"), where the phrase rules caught 6 of 11 garbled test lines and
+Jev 11 of 11.
+
 ## The alert, and "Send anyway"
 
 | Score | Result |

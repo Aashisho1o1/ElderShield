@@ -406,7 +406,7 @@ async function refresh(){
   document.getElementById('people').innerHTML = t.contacts.length ? t.contacts.map(personCard).join('') : '<span class="muted">No calls yet</span>';
   document.getElementById('calls').innerHTML = t.recent_calls.length ? t.recent_calls.slice(0,6).map(callRow).join('') : '<span class="muted">No calls yet</span>';
   const a=s.alert[0];
-  if(a && a.ts>lastAlertTs){ lastAlertTs=a.ts; if(!d.private_window && a.title.startsWith('On this call')) showLive(a); }
+  if(a && a.ts>lastAlertTs){ lastAlertTs=a.ts; if(!d.private_window && !a.title.startsWith('Wait')) showLive(a); }
 }
 async function loadStory(){ await post('/demo/seed',{}); refresh(); await post('/assess',{}); refresh(); }
 async function resetAll(){ await post('/reset',{}); location.reload(); }

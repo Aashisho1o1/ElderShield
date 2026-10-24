@@ -645,6 +645,53 @@ def evidence_for(store: Store, contact: sqlite3.Row, now: float) -> dict[str, An
     }
 
 
+# What Jev's judgment says to her. Fixed wording keyed by level and pattern; the second line is
+# built from the same evidence Jev was given, so the alert shows its reasons, not just a verdict.
+VERDICT_ALERTS = {
+    "high": {
+        "romance": ("This call fits how romance scams work",
+                    "Someone who truly cares about you won't rush you, hide from your family, or need your money."),
+        "impersonation": ("This call fits how bank and tech-support scams work",
+                          "A real bank or tech company never asks for remote access, codes, or urgent payments."),
+        "investment": ("This call fits how investment scams work",
+                       "Guaranteed returns don't exist. No one you've just met should be managing your money."),
+        "family_emergency": ("This call fits how family-emergency scams work",
+                             "Hang up and call that relative on the number you already have."),
+        "none": ("This caller's behaviour is a serious concern",
+                 "The pattern of these calls looks like manipulation, even if no single thing said was alarming."),
+    },
+    "watch": {
+        "default": ("Something about these calls is concerning",
+                    "Nothing has happened yet, but this is how manipulation usually starts. Take it slowly."),
+    },
+}
+
+
+def verdict_alert(level: str, verdict: dict[str, Any], evidence: dict[str, Any], who: str) -> tuple[str, str]:
+    """(title, body) for a layer-2 alert. The body's first sentence is the evidence, in her words."""
+    c = evidence["caller"]
+    name = "This caller" if who == "Unknown caller" else who
+    facts = [f"{name} has known you {c['known_for_days']} days"]
+    if c["calls_this_week"] >= 3:
+        facts.append(f"called {c['calls_this_week']} times this week")
+    if c["late_night_calls_this_week"] >= 2:
+        facts.append("calls late at night")
+    if "isolation_secrecy" in c["warning_signs_ever"]:
+        facts.append("asked you to keep things from your family")
+    if c["days_with_money_requests"]:
+        facts.append(f"asked for money on {c['days_with_money_requests']} different day"
+                     + ("s" if c["days_with_money_requests"] > 1 else ""))
+    elif "crypto_investment" in c["warning_signs_ever"]:
+        facts.append("talked about investing")
+    if c["payments_sent_after_first_request"]:
+        facts.append("already received money from you")
+    title, advice = (VERDICT_ALERTS["high"].get(verdict["pattern"], VERDICT_ALERTS["high"]["none"]) if level == "high"
+                     else VERDICT_ALERTS["watch"]["default"])
+    pct = int(verdict["fraud_likely"] * 100)
+    body = ", ".join(facts) + ". " + advice + f"\n\n(Jev's judgment of the whole pattern: {pct}% likely fraud. It's safe to hang up.)"
+    return f"{title} ({pct}% sure)", body
+
+
 class Assessor:
     """Runs Jev's call-level judgment every ASSESS_EVERY_S while a call is live, at once when a
     new warning sign lands (poke), and once more when the call ends."""
@@ -653,6 +700,7 @@ class Assessor:
         self.store = store
         self._wake = threading.Event()
         self._last_call: Optional[str] = None
+        self._alerted: set[tuple[str, str]] = set()     # (call, level) already shown
         Thread(target=self._loop, daemon=True).start()
 
     def poke(self) -> None:
@@ -685,7 +733,28 @@ class Assessor:
         verdict = jev.assess(evidence)
         if verdict:
             self.store.add_assessment(contact_id, call_id, verdict, evidence)
+            if call_id:
+                self._maybe_alert(contact, call_id, verdict, evidence)
         return verdict
+
+    def _maybe_alert(self, contact: sqlite3.Row, call_id: str, verdict: dict[str, Any], evidence: dict[str, Any]) -> None:
+        """Alert on a crossing, not a reading: once per call when the judgment reaches 'high'
+        (>= 0.7), and once when it reaches 'watch' (>= 0.4 and up 0.2 on the baseline). The
+        baseline is the last verdict before this call started, so a caller who already looked
+        bad yesterday still gets today's alert, and a refresh at the same level stays silent."""
+        p = verdict["fraud_likely"]
+        baseline = self.store.conn.execute(
+            "SELECT fraud_likely FROM assessments WHERE contact_id=? AND (call_id IS NULL OR call_id<>?) "
+            "ORDER BY ts DESC LIMIT 1", (contact["id"], call_id)).fetchone()
+        base = baseline[0] if baseline else 0.0
+        level = "high" if p >= 0.7 else "watch" if p >= 0.4 and p - base >= 0.2 else None
+        if not level or (call_id, level) in self._alerted:
+            return
+        if level == "watch" and (call_id, "high") in self._alerted:
+            return
+        self._alerted.add((call_id, level))
+        title, body = verdict_alert(level, verdict, evidence, contact["label"])
+        self.store.push_alert(title, body)
 
 
 PATTERN_WORDS = {"romance": "a romance scam", "impersonation": "a bank or tech-support impersonation scam",
