@@ -13,3 +13,7 @@ macos/eldershield-warning
 # built by capture-test.sh
 macos/Listen.app/
 macos/capture-test.log
+macos/listen.log
+
+# API keys live here, never in git
+.env

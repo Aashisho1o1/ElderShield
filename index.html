@@ -72,6 +72,7 @@
   .chip{font:11px/1.7 var(--mono);color:var(--sub);border:1px solid var(--line);border-radius:6px;padding:0 7px}
   .chip.bad{color:var(--bad);border-color:rgba(248,113,113,.3)}
   .chip.warn{color:var(--warn);border-color:rgba(251,191,36,.3)}
+  .chip.good{color:var(--good);border-color:rgba(74,222,128,.3)}
   .decision{font-size:11px;font-weight:600;letter-spacing:.06em;padding:2px 10px;border-radius:999px;border:1px solid}
   .d-ALLOW{color:var(--good);border-color:rgba(74,222,128,.35)}
   .d-CHALLENGE{color:var(--warn);border-color:rgba(251,191,36,.35)}
@@ -98,6 +99,13 @@
   .c-head{display:flex;gap:6px;align-items:baseline;font-size:12.5px;flex-wrap:wrap}
   .snip{font-size:12.5px;color:var(--sub);font-style:italic;margin-top:4px}
   .you{font-size:12.5px;color:var(--warn);margin-bottom:8px}
+  .verdict-box{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+  .v-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px}
+  .bars{margin-top:8px;display:grid;gap:4px}
+  .bar-row{display:grid;grid-template-columns:120px 1fr 36px;gap:8px;align-items:center;font-size:11px;color:var(--label)}
+  .bar-row i{display:block;height:4px;border-radius:2px;background:rgba(255,255,255,.08)} .bar-row b{display:block;height:100%;border-radius:2px;background:var(--warn)}
+  .high .bar-row b{background:var(--bad)}
+  .bar-row span:last-child{text-align:right}
   .hint{font-size:12px;color:var(--label);margin:20px 0 0;border-top:1px solid var(--line);padding-top:12px}
 
   /* What a screen-sharing caller sees: a plain, believable stall */
@@ -159,6 +167,7 @@
     <div class="body">
       <div class="sec">This computer</div>
       <div id="device"><span class="muted">Device sensor off</span></div>
+      <div id="jev" style="margin-top:6px;font-size:12px"></div>
       <div id="liveCall"></div>
       <div class="sec">Last payment check</div>
       <div id="lastCheck"><span class="muted">No payment checked yet</span></div>
@@ -349,6 +358,17 @@ function personCard(c){
       <div class="ladder-names">${STAGE_SHORT.slice(1).map(s=>`<span>${s}</span>`).join('')}</div>`:''}
     <div class="spark" title="calls per day, last 3 weeks">${c.per_day.map(n=>`<i style="height:${Math.round(n/max*100)}%"></i>`).join('')}</div>
     ${c.flags.length?`<ul class="flags">${c.flags.map(f=>`<li>${esc(f)}</li>`).join('')}</ul>`:''}
+    ${c.jev?jevVerdict(c.jev):''}
+  </div>`;
+}
+/* Layer 2: Jev's judgment of this caller's whole history, refreshed every few seconds during a call. */
+function jevVerdict(j){
+  const pct=x=>Math.round(x*100), delta=j.previous_fraud_likely==null?'':(j.fraud_likely>j.previous_fraud_likely+0.04?' ↑':j.fraud_likely<j.previous_fraud_likely-0.04?' ↓':'');
+  const cls=j.fraud_likely>=0.7?'bad':j.fraud_likely>=0.4?'warn':'good';
+  return `<div class="verdict-box">
+    <div class="v-head"><span class="chip ${cls}">Jev: ${pct(j.fraud_likely)}% fraud${delta}</span>
+      <span class="muted">${esc(j.pattern_words)}${j.pattern!=='none'?' · '+pct(j.pattern_confidence)+'% sure':''} · ${esc(j.ago)} · ${j.ms} ms</span></div>
+    <div class="bars">${[['steering toward money',j.financial_steering],['isolating her',j.isolation],['asks escalating',j.escalation/3]].map(([n,v])=>`<div class="bar-row"><span>${n}</span><i><b style="width:${pct(v)}%"></b></i><span>${pct(v)}%</span></div>`).join('')}</div>
   </div>`;
 }
 function callRow(c){
@@ -356,7 +376,7 @@ function callRow(c){
     <div class="c-head"><span>${when(c.started)}</span><b>${esc(c.who)}</b><span class="muted">${esc(c.app)} · ${c.minutes} min</span>
       ${c.live?'<span class="chip bad">live</span>':''}${c.late?'<span class="chip">late night</span>':''}
       ${c.remote_access.map(r=>`<span class="chip bad">${esc(r)}</span>`).join('')}</div>
-    ${c.heard.length?`<div class="chips" style="margin-top:4px">${[...new Set(c.heard.map(h=>h.words))].map(w=>`<span class="chip warn">${esc(w)}</span>`).join('')}</div>`:''}
+    ${c.heard.length?`<div class="chips" style="margin-top:4px">${[...new Map(c.heard.map(h=>[h.words,h])).values()].map(h=>`<span class="chip warn" title="${h.source==='jev'?'heard by Jev, '+Math.round(h.confidence*100)+'% sure':'matched a known phrase'}">${esc(h.words)}${h.source==='jev'?' <small>·jev</small>':''}</span>`).join('')}</div>`:''}
     ${c.heard.filter(h=>h.snippet).slice(0,2).map(h=>`<div class="snip">“${esc(h.snippet)}”</div>`).join('')}
     ${c.payments.map(p=>`<div class="meta">tried to send $${Number(p.amount||0).toLocaleString()} · ${esc(p.decision)}</div>`).join('')}
   </div>`;
@@ -376,6 +396,9 @@ async function refresh(){
          ${d.remote_access_earlier.map(r=>`<span class="chip warn">${esc(r)} ran earlier today</span>`).join('')}
          ${d.private_window?'<span class="chip">private alerts on</span>':''}
        </div>`;
+  const jv=s.jev||{};
+  document.getElementById('jev').innerHTML = !jv.enabled ? '<span class="muted">Jev off (set OPENROUTER_API_KEY): phrase rules only</span>'
+    : `<span class="chip ${jv.last_error?'bad':'good'}">Jev ${jv.last_error?'error':'on'}</span> <span class="muted">${jv.calls} sentence${jv.calls===1?'':'s'} asked${jv.last_ms!=null?' · last '+jv.last_ms+' ms':''}${jv.model?' · '+esc(jv.model):''}${jv.last_error?' · '+esc(jv.last_error):''}</span>`;
   const liveCall=t.recent_calls.find(c=>c.live);
   document.getElementById('liveCall').innerHTML = liveCall && liveCall.heard.length
     ? `<div class="sec">On this call</div>${callRow(liveCall)}` : '';
@@ -383,9 +406,9 @@ async function refresh(){
   document.getElementById('people').innerHTML = t.contacts.length ? t.contacts.map(personCard).join('') : '<span class="muted">No calls yet</span>';
   document.getElementById('calls').innerHTML = t.recent_calls.length ? t.recent_calls.slice(0,6).map(callRow).join('') : '<span class="muted">No calls yet</span>';
   const a=s.alert[0];
-  if(a && a.ts>lastAlertTs){ lastAlertTs=a.ts; if(!d.private_window && a.title.startsWith('On this call')) showLive(a); }
+  if(a && a.ts>lastAlertTs){ lastAlertTs=a.ts; if(!d.private_window && !a.title.startsWith('Wait')) showLive(a); }
 }
-async function loadStory(){ await post('/demo/seed',{}); refresh(); }
+async function loadStory(){ await post('/demo/seed',{}); refresh(); await post('/assess',{}); refresh(); }
 async function resetAll(){ await post('/reset',{}); location.reload(); }
 
 j('/state').then(s=>{ lastAlertTs=(s.alert[0]||{}).ts||0; });   // don't replay an old alert on page load

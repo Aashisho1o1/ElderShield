@@ -167,6 +167,8 @@ def main() -> None:
     parser.add_argument("--caller", help="who the call is with, if the call history can't say (demo)")
     parser.add_argument("--script", type=Path, help="lines to play as if heard on the call (demo)")
     parser.add_argument("--listen", action="store_true", help="listen to calls on this Mac (opt-in)")
+    parser.add_argument("--allow-cloud", action="store_true",
+                        help="with --listen: if the on-device speech model is missing, let Apple's servers transcribe")
     parser.add_argument("--speak", action="store_true", help="also say alerts aloud (headphones only)")
     args = parser.parse_args()
     if sys.platform != "darwin":
@@ -200,7 +202,8 @@ def watch(args, pretend, private_window: bool, listener: bool) -> None:
             if started:
                 caller = args.caller or latest_caller()
                 if listener:
-                    subprocess.run(["open", "-n", str(LISTEN_APP), "--args", "--post", DAEMON + "/calls/transcript"])
+                    subprocess.run(["open", "-n", str(LISTEN_APP), "--args", "--post", DAEMON + "/calls/transcript",
+                                    "--log", str(MACOS / "listen.log"), *(["--allow-cloud"] if args.allow_cloud else [])])
                 if args.script:
                     script_stop.clear()
                     threading.Thread(target=play_script, args=(args.script, script_stop), daemon=True).start()

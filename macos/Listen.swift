@@ -5,6 +5,8 @@
 // Apple's on-device speech recognizer on it. Nothing is saved here.
 //
 //   Test:   macos/capture-test.sh [--seconds 20]       prints a level meter and the transcript
+//   Speech is transcribed on this Mac. If the on-device model is missing, it says so and doesn't
+//   transcribe, unless --allow-cloud lets Apple's servers do it.
 //   Listen: started by device_watch.py --listen with --post http://127.0.0.1:8777/calls/transcript;
 //           sends text in ~15 s chunks while the call lasts. The daemon keeps only warning-sign
 //           labels and the flagged sentence.
@@ -24,6 +26,7 @@ func arg(_ name: String) -> String? {
 }
 let postURL = arg("--post").flatMap(URL.init(string:))
 let seconds = postURL == nil ? Int(arg("--seconds") ?? "") ?? 20 : Int.max
+let allowCloud = CommandLine.arguments.contains("--allow-cloud")
 // Launched with `open` (so macOS attributes the permission prompts to this app, not the
 // terminal), stdout goes nowhere; the caller tails this file instead.
 let logFile: FileHandle? = arg("--log").flatMap { path in
@@ -110,12 +113,26 @@ func send(_ chunk: Int, _ text: String, final: Bool) {
     URLSession.shared.dataTask(with: req).resume()
 }
 
+var transcribing = false        // set once we know where speech will be transcribed
+
+// Words the scam check looks for. Hinting them makes the recognizer more likely to hear them
+// right ("AnyDesk", not "any desk"). Keep in step with LEXICON in server.py.
+let hints = ["AnyDesk", "TeamViewer", "remote access", "screen share", "install this app",
+             "gift card", "gift cards", "Target gift cards", "iTunes card", "Apple card", "Google Play card",
+             "read me the numbers", "Western Union", "wire", "wire transfer", "send money", "lend me",
+             "customs", "hospital", "plane ticket", "pay the fee", "bitcoin", "crypto", "USDT",
+             "trading platform", "guaranteed return", "verification code", "one-time code", "six-digit code",
+             "read me the code", "don't tell", "keep this between us", "our secret", "my love", "sweetheart",
+             "darling", "soulmate", "marry you", "oil rig", "deployed", "camera is broken", "account is frozen",
+             "warrant", "arrested"]
+
 func newChunk() {
-    guard let recognizer else { return }
+    guard let recognizer, transcribing else { return }
     chunk += 1
     let mine = chunk
     let req = SFSpeechAudioBufferRecognitionRequest()
     req.shouldReportPartialResults = true
+    req.contextualStrings = hints
     req.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
     let previous = request
     request = req                      // new audio goes to the new chunk from here on
@@ -137,7 +154,8 @@ func newChunk() {
 }
 
 // --- capture --------------------------------------------------------------------------
-var peak: Float = 0
+var peak: Float = 0             // loudest moment, for the test result
+var level: Float = 0            // loudest moment in the last second, for the meter
 var termSource: DispatchSourceSignal?   // global: a local would be released and SIGTERM ignored
 
 func startCapture() {
@@ -177,7 +195,9 @@ func startCapture() {
               let ch = buf.floatChannelData?[0], buf.frameLength > 0 else { return }
         var sum: Float = 0
         for i in 0..<Int(buf.frameLength) { sum += ch[i] * ch[i] }
-        peak = max(peak, (sum / Float(buf.frameLength)).squareRoot())
+        let rms = (sum / Float(buf.frameLength)).squareRoot()
+        peak = max(peak, rms)
+        level = max(level, rms)
         request?.append(buf)
     }, "create IO proc")
     check(AudioDeviceStart(agg, proc), "start capture")
@@ -199,7 +219,8 @@ func startCapture() {
     Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { t in
         let elapsed = Int(Date().timeIntervalSince(started))
         if postURL == nil {
-            let bars = String(repeating: "▮", count: min(20, Int(peak * 200)))
+            let bars = String(repeating: "▮", count: min(20, Int(level * 200)))
+            level = 0
             out("  \(elapsed)s  level \(bars.isEmpty ? "·" : bars)  sounding: \(soundingProcesses().joined(separator: ", "))")
         }
         guard elapsed >= seconds else { return }
@@ -209,7 +230,8 @@ func startCapture() {
             out("")
             out(peak > 0.002 ? "RESULT: audio received (peak level \(String(format: "%.3f", peak)))"
                              : "RESULT: no audio received. If a call was live, the tap can't hear it (or permission was denied).")
-            out(transcript.isEmpty ? "RESULT: no transcript (no speech heard, or recognition unavailable)"
+            out(!transcribing ? "RESULT: not transcribed (see the on-device line above)"
+                : transcript.isEmpty ? "RESULT: no transcript (no speech heard)"
                                    : "RESULT: transcript → \"\(transcript)\"")
             exit(0)
         }
@@ -224,8 +246,17 @@ SFSpeechRecognizer.requestAuthorization { status in
         out(status == .authorized ? "✓ speech recognition allowed"
                                   : "! speech recognition not allowed (\(status.rawValue)); audio check still runs")
         if status == .authorized {
-            out(recognizer?.supportsOnDeviceRecognition == true ? "✓ on-device speech recognition available"
-                : "! on-device recognition not available for en-US; Apple's server is used instead")
+            if recognizer?.supportsOnDeviceRecognition == true {
+                out("✓ speech is transcribed on this Mac")
+                transcribing = true
+            } else if allowCloud {
+                out("! the on-device speech model isn't installed; Apple's servers transcribe instead (--allow-cloud)")
+                transcribing = true
+            } else {
+                out("✗ the on-device speech model isn't installed, so nothing will be transcribed. To install it: "
+                    + "System Settings → Keyboard → Dictation → turn it on (and pick English), wait a few minutes "
+                    + "for the download, then run again. Or pass --allow-cloud to let Apple's servers transcribe.")
+            }
             newChunk()
         }
         startCapture()

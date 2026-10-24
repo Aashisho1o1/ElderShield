@@ -65,6 +65,41 @@ alert is up; the recording should show the stall but not the alert.
 FaceTiming your own Mac: open FaceTime and record a Voice Memo (the sensor treats that as a call),
 or join a FaceTime link from an Android/Windows browser, or answer an iPhone call on the Mac.
 
+## Jev: hearing what the phrase rules miss
+
+The phrase rules catch the obvious wording ("gift cards", "don't tell"). With a key, every
+finished sentence of the call also goes to [Jev](https://openrouter.ai/typesafe), a decision
+model that answers ten yes/no questions ("the speaker asks for money", "the speaker asks for
+secrecy", …) in about 300–500 ms with a calibrated probability each. That is how *"I'm a bit short
+until my pension clears, could you help me out?"* becomes **asked for money** with no keyword in
+it. Jev returns numbers only; nothing it produces is shown to the senior as text.
+
+```bash
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env     # Jev via OpenRouter (the .env file is git-ignored)
+set -a; source .env; set +a; python server.py
+```
+
+`TYPESAFE_API_KEY` works the same way against TypeSafe's own API. Without a key the rules run alone.
+Labels Jev added show a small "·jev" tag on the call. Cost: about $0.00002 per sentence.
+
+**Jev also judges the whole relationship.** Every 5 s during a call (and the moment a new warning
+sign lands, and once more when the call ends) Jev reads the caller's history from the journal as
+evidence (days known, calls per week and their length, late-night calls, the warning signs in
+order, the amounts asked, payments made; never any words) and answers: how likely is fraud, is the
+caller steering toward money, isolating her, are the asks escalating, and which scam pattern this
+fits. The verdict sits on the caller's card ("Jev: 97% fraud · a romance scam") and, when a payment
+is attempted, becomes the long-term component of the score with the rule-based ladder as its floor,
+so a Jev outage never weakens the rules. `ELDERSHIELD_ASSESS_EVERY_S` changes the interval.
+
+When that judgment crosses a line during a call, she gets an alert of its own, once per call:
+*"This call fits how romance scams work (96% sure). Daniel has known you 20 days, called 6 times
+this week, calls late at night, asked you to keep things from your family, asked for money on 3
+different days…"* The pattern picks the wording (romance, bank/tech-support, investment,
+family-emergency, or just "a serious concern"); the facts come from the journal. So the scam
+alert no longer depends on a phrase match: Jev also reads through speech-to-text errors ("target
+give cards", "by coin", "any desk"), where the phrase rules caught 6 of 11 garbled test lines and
+Jev 11 of 11.
+
 ## The alert, and "Send anyway"
 
 | Score | Result |
