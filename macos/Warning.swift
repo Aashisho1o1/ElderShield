@@ -4,7 +4,7 @@
 import AppKit
 
 let args = CommandLine.arguments
-let title = args.count > 1 ? args[1] : "Your money has not been sent."
+let title = args.count > 1 ? args[1] : "ElderShield"
 let body = args.count > 2 ? args[2] : ""
 let hiddenFromCapture = !args.contains("--visible-to-capture")
 
@@ -74,4 +74,5 @@ window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 if hiddenFromCapture { window.sharingType = .none }
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
+Timer.scheduledTimer(withTimeInterval: 180, repeats: false) { _ in NSApp.terminate(nil) }   // don't linger
 app.run()

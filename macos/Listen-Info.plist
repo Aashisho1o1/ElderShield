@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>org.eldershield.capture-test</string>
+  <key>CFBundleName</key><string>ElderShield listener</string>
+  <key>CFBundleExecutable</key><string>listen</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>LSUIElement</key><true/>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>ElderShield listens to a call for scam warning signs. Nothing is recorded or saved.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>ElderShield turns call audio into text on this Mac to spot scam warning signs.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ElderShield listens for scam warning signs during calls.</string>
+</dict>
+</plist>

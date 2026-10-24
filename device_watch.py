@@ -2,36 +2,44 @@
 Tells ElderShield what is happening on this Mac right now, and shows its private warnings.
 
   - A live call: FaceTime (which also carries iPhone calls on a Mac) or another call app is
-    running while the microphone is in use.
+    running while the microphone is in use; and who it's with, if the Mac's call history is
+    readable (System Settings → Privacy & Security → Full Disk Access for this terminal).
   - Remote control: AnyDesk, TeamViewer and similar apps are running.
+  - With --listen: what is said on the call, heard on this Mac by macos/Listen.swift.
 
-It reports to the daemon every 2 s. When the daemon intercepts a payment while someone may be
-watching, the warning appears in a window that screen sharing and screen capture can't see
-(macos/Warning.swift), so a scammer watching the shared screen sees only the "processing" stall.
+It reports to the daemon every 2 s and shows the daemon's alerts in a window that screen
+sharing and screen capture can't see (macos/Warning.swift).
 
-    python device_watch.py                              # real sensors
-    python device_watch.py --pretend facetime,anydesk   # rehearse the demo without a real call
-    python device_watch.py --speak                      # also say warnings aloud (headphones only:
-                                                        # on speaker the caller would hear it)
+    python device_watch.py                                   # real sensors
+    python device_watch.py --listen                          # also listen to calls (opt-in)
+    python device_watch.py --pretend facetime --caller Daniel --script demo/romance_call.txt
+                                                             # rehearse the demo without a real call
+    python device_watch.py --speak                           # also say alerts aloud (headphones only)
 
-Needs no macOS permissions: it reads the process list and whether the microphone is in use,
-never audio or screen contents.
+Without --listen it needs no macOS permissions: it reads the process list and whether the
+microphone is in use, never audio or screen contents.
 """
 
 import argparse
 import ctypes
 import ctypes.util
 import json
+import shutil
+import signal
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
 
 DAEMON = "http://127.0.0.1:8777"
 HERE = Path(__file__).resolve().parent
-WARNING_SRC = HERE / "macos" / "Warning.swift"
-WARNING_BIN = HERE / "macos" / "eldershield-warning"
+MACOS = HERE / "macos"
+WARNING_BIN = MACOS / "eldershield-warning"
+LISTEN_APP = MACOS / "Listen.app"
+CALL_HISTORY = Path.home() / "Library/Application Support/CallHistoryDB/CallHistory.storedata"
 
 # Matched against each running process's executable path, lower-cased.
 CALL_APPS = {"/facetime.app/": "FaceTime", "/zoom.us.app/": "Zoom", "/whatsapp.app/": "WhatsApp",
@@ -68,6 +76,20 @@ def microphone_in_use() -> bool:
     return bool(device) and bool(_audio_u32(core_audio, device, b"gone"))   # running somewhere?
 
 
+def latest_caller() -> str | None:
+    """Best effort: the newest entry in the Mac's call history (needs Full Disk Access)."""
+    try:
+        db = sqlite3.connect(f"file:{CALL_HISTORY}?mode=ro", uri=True)
+        row = db.execute("SELECT ZNAME, ZADDRESS FROM ZCALLRECORD ORDER BY ZDATE DESC LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    name, number = row
+    digits = "".join(ch for ch in str(number or "") if ch.isdigit())
+    return name or (f"Caller ending {digits[-4:]}" if digits else None)
+
+
 def sense(pretend: list[str] | None) -> dict:
     if pretend is not None:
         names = {n.lower(): n for n in [*CALL_APPS.values(), *REMOTE_ACCESS.values()]}
@@ -81,25 +103,41 @@ def sense(pretend: list[str] | None) -> dict:
 
 
 def describe(state: dict) -> str:
-    call = f"{state['call_app']} call live" if state["call_app"] else "no call"
+    call = (f"{state['call_app']} call live" + (f" with {state['caller']}" if state.get("caller") else "")
+            if state["call_app"] else "no call")
     remote = (", ".join(state["remote_access"]) + " running") if state["remote_access"] else "no remote-control apps"
     return f"{call} · {remote}"
 
 
-def build_warning_window() -> bool:
-    """Compiles the capture-proof warning window once. Without it, warnings stay in the web page,
-    which screen sharing can see."""
-    if WARNING_BIN.exists() and WARNING_BIN.stat().st_mtime >= WARNING_SRC.stat().st_mtime:
+def _build(src: Path, out: Path) -> bool:
+    """Compile a Swift helper once (and again when its source changes)."""
+    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
         return True
-    print("Building the private warning window (one time)…")
+    print(f"Building {src.name} (one time)…")
     try:
-        r = subprocess.run(["swiftc", "-O", str(WARNING_SRC), "-o", str(WARNING_BIN)], capture_output=True, text=True)
+        r = subprocess.run(["swiftc", "-O", str(src), "-o", str(out)], capture_output=True, text=True)
     except FileNotFoundError:
-        print("swiftc not found (install Xcode Command Line Tools); warnings will stay in the page.")
+        print("swiftc not found (install Xcode Command Line Tools with `xcode-select --install`).")
         return False
     if r.returncode:
-        print("Couldn't build it; warnings will stay in the page.\n" + r.stderr[-800:])
+        print("Couldn't build it:\n" + r.stderr[-800:])
     return r.returncode == 0
+
+
+def build_warning_window() -> bool:
+    """The capture-proof alert window. Without it, alerts stay in the web page."""
+    return _build(MACOS / "Warning.swift", WARNING_BIN)
+
+
+def build_listener() -> bool:
+    """The listener is an .app: macOS only honours its permission strings inside a bundle."""
+    contents = LISTEN_APP / "Contents"
+    (contents / "MacOS").mkdir(parents=True, exist_ok=True)
+    shutil.copy(MACOS / "Listen-Info.plist", contents / "Info.plist")
+    built = _build(MACOS / "Listen.swift", contents / "MacOS" / "listen")
+    if built:
+        subprocess.run(["codesign", "--force", "--sign", "-", str(LISTEN_APP)], capture_output=True)
+    return built
 
 
 def daemon(path: str, body: dict | None = None):
@@ -109,32 +147,82 @@ def daemon(path: str, body: dict | None = None):
         return json.loads(r.read())
 
 
+def play_script(path: Path, stop: threading.Event) -> None:
+    """The demo's stand-in for listening: one line every 6 s, as if heard on the call."""
+    for i, line in enumerate(l.strip() for l in path.read_text().splitlines()):
+        if stop.wait(6):
+            return
+        if not line:
+            continue
+        try:
+            daemon("/calls/transcript", {"chunk": 1000 + i, "text": line})
+            print(f"  heard: {line}")
+        except OSError:
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ElderShield device sensor for macOS")
     parser.add_argument("--pretend", help="report these instead of sensing, e.g. facetime,anydesk")
-    parser.add_argument("--speak", action="store_true", help="also say warnings aloud (headphones only)")
+    parser.add_argument("--caller", help="who the call is with, if the call history can't say (demo)")
+    parser.add_argument("--script", type=Path, help="lines to play as if heard on the call (demo)")
+    parser.add_argument("--listen", action="store_true", help="listen to calls on this Mac (opt-in)")
+    parser.add_argument("--speak", action="store_true", help="also say alerts aloud (headphones only)")
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("device_watch.py runs on macOS.")
     sys.stdout.reconfigure(line_buffering=True)        # status lines show up even when logged to a file
 
     private_window = build_warning_window()
+    listener = args.listen and build_listener()
     pretend = [p.strip().lower() for p in args.pretend.split(",")] if args.pretend else None
-    last_alert, last_state, reachable = 0, None, None
-    print("ElderShield device sensor running" + (" (pretend mode)" if pretend is not None else "") + ".")
+    print("ElderShield device sensor running" + (" (pretend mode)" if pretend is not None else "")
+          + (", listening to calls" if listener else "") + ".")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))   # so the cleanup below runs on `kill` too
+    try:
+        watch(args, pretend, private_window, listener)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if listener:                     # never leave the listener running after the sensor stops
+            subprocess.run(["pkill", "-f", str(LISTEN_APP / "Contents/MacOS/listen")])
+
+
+def watch(args, pretend, private_window: bool, listener: bool) -> None:
+    last_alert, last_state, reachable, caller = time.time(), None, None, None
+    window = None
+    script_stop = threading.Event()
     while True:
         try:
             state = sense(pretend)
+            started = state["call_app"] and not (last_state or {}).get("call_app")
+            ended = not state["call_app"] and (last_state or {}).get("call_app")
+            if started:
+                caller = args.caller or latest_caller()
+                if listener:
+                    subprocess.run(["open", "-n", str(LISTEN_APP), "--args", "--post", DAEMON + "/calls/transcript"])
+                if args.script:
+                    script_stop.clear()
+                    threading.Thread(target=play_script, args=(args.script, script_stop), daemon=True).start()
+            if ended:
+                caller = None
+                script_stop.set()
+                if listener:
+                    subprocess.run(["pkill", "-f", str(LISTEN_APP / "Contents/MacOS/listen")])
+            state["caller"] = caller if state["call_app"] else None
             daemon("/device/context", {**state, "private_window": private_window})
             for alert in daemon(f"/device/alerts?after={last_alert}"):
-                last_alert = alert["id"]
+                last_alert = alert["ts"]
                 if private_window:
-                    subprocess.Popen([str(WARNING_BIN), alert["title"], alert["body"]])
+                    if window and window.poll() is None:
+                        window.terminate()                       # one alert on screen at a time
+                    window = subprocess.Popen([str(WARNING_BIN), alert["title"], alert["body"]],
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if args.speak:
-                    subprocess.Popen(["say", f"This is ElderShield. {alert['title']} It is safe to hang up."])
+                    subprocess.Popen(["say", f"This is ElderShield. {alert['title']}"], stdout=subprocess.DEVNULL)
             if state != last_state:
                 print(describe(state))
-                last_state = state
+            last_state = state
             if reachable is False:
                 print("ElderShield is reachable again.")
             reachable = True
