@@ -89,15 +89,12 @@ PORT = 8777
 # allowlisted extension origin, if one is configured) may call it. The Host check stops
 # DNS-rebinding pages that resolve their own name to 127.0.0.1.
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
-GMAIL_EXTENSION_ORIGIN = "chrome-extension://cafpgeefdbbgfbbjgmplcempolghagok"   # fixed by the key in extension/manifest.json
-EXTENSION_ORIGINS = {GMAIL_EXTENSION_ORIGIN} | {
-    o for o in os.environ.get("ELDERSHIELD_ALLOWED_ORIGINS", "").split(",") if o}
+EXTENSION_ORIGINS = {o for o in os.environ.get("ELDERSHIELD_ALLOWED_ORIGINS", "").split(",") if o}
 ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS} | EXTENSION_ORIGINS
 
-# Senior override: a CHALLENGE can be released at once; an INTERCEPT only after a cooling-off
-# period, so a scammer on the phone can't talk the senior through the button.
-OVERRIDE_DELAY_S = int(os.environ.get("ELDERSHIELD_OVERRIDE_DELAY_S", str(24 * 3600)))
-OVERRIDE_WINDOW_S = 24 * 3600                     # how long a released transfer stays sendable
+# "Send anyway": a CHALLENGE can be sent at once; an INTERCEPT once nobody is watching (the call
+# has ended and remote-control apps are closed), so a scammer can't talk the senior through it.
+OVERRIDE_WINDOW_S = 15 * 60                       # how long a released payment stays sendable
 
 # --------------------------------------------------------------------------- #
 # Small utilities
@@ -1905,6 +1902,9 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
             "matched_trigger_id": None,
             "whisper": "",
             "decoy": None,
+            "private_overlay": False,
+            "reasons": [],
+            "someone_watching": False,
             "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
             "within_budget": True,
             "llm_enriched": False,
@@ -1967,10 +1967,13 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
     # While someone may be watching, the truth goes to a window screen sharing can't see and the
     # page shows only the stall. Releasing the payment waits until nobody is watching.
     private_overlay = decoy is not None and device["private_window"]
+    reasons = core["reason"].split("; ")
     if private_overlay:
-        DEVICE_CTX.push_alert("Your money has not been sent.",
-                              whisper.replace("Your money has not been sent. ", "", 1)
-                              + " The other person sees a fake “processing” screen, so they'll keep waiting.")
+        amount = f" ${a.amount:,.0f}" if a.amount else " this payment"
+        DEVICE_CTX.push_alert(f"Wait — before you send{amount}",
+                              "\n".join(f"• {r[0].upper()}{r[1:]}" for r in reasons)
+                              + "\n\nIt's safe to hang up. You can still send it once the call has ended."
+                              + " The other person only sees a “processing” screen.")
     RECENT_ACTIONS[action.id] = {"fingerprint": fingerprint, "decision": core["decision"]}
     while len(RECENT_ACTIONS) > 200:
         RECENT_ACTIONS.pop(next(iter(RECENT_ACTIONS)))
@@ -2001,6 +2004,8 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
         "provenance_matched": prov_matched,
         "watchlist_hits": len(watch_matches),
         "private_overlay": private_overlay,
+        "reasons": reasons if core["decision"] != "ALLOW" else [],
+        "someone_watching": someone_watching,
         "legacy_url_scanner": {"verdict": "100% SAFE", "basis": "official domain / valid TLS"},
     }
 
@@ -2065,24 +2070,24 @@ def replay_scenario(scenario: str) -> dict[str, Any]:
 
 @app.post("/override", response_model=None)
 def create_override(o: OverrideIn) -> dict[str, Any] | JSONResponse:
-    """Release one paused payment. A CHALLENGE is released at once; an INTERCEPT only after
-    the cooling-off delay. The token works once, for that exact payment, and is audited."""
+    """"Send anyway" for one paused payment. A CHALLENGE is released at once; an INTERCEPT once
+    nobody is watching: the call has ended and remote-control apps are closed. The scammer's hold
+    depends on keeping her on the line, so this breaks it without blocking her. The token works
+    once, for that exact payment, and every release is recorded."""
     act = RECENT_ACTIONS.get(o.action_id)
     if not act or act["decision"] == "ALLOW":
         return JSONResponse({"error": "no paused payment with that action_id"}, status_code=404)
+    device = DEVICE_CTX.snapshot()
+    if act["decision"] == "INTERCEPT" and (device["call_app"] or device["remote_access"]):
+        return JSONResponse({"error": "wait_until_nobody_is_watching", "call_app": device["call_app"],
+                             "remote_access": device["remote_access"]}, status_code=409)
     now = now_ts()
-    valid_from = now + (OVERRIDE_DELAY_S if act["decision"] == "INTERCEPT" else 0)
     token = "ovr_" + uuid.uuid4().hex
     CASE_MANAGER.add_override(token=token, action_id=o.action_id, fingerprint=act["fingerprint"],
                               decision=act["decision"], reason=o.reason, created_at=now,
-                              valid_from=valid_from, expires_at=valid_from + OVERRIDE_WINDOW_S)
-    return {
-        "override_token": token,
-        "status": "scheduled" if valid_from > now else "approved",
-        "valid_from": iso(valid_from),
-        "expires_at": iso(valid_from + OVERRIDE_WINDOW_S),
-        "reason": o.reason,
-    }
+                              valid_from=now, expires_at=now + OVERRIDE_WINDOW_S)
+    return {"override_token": token, "status": "approved", "expires_at": iso(now + OVERRIDE_WINDOW_S),
+            "reason": o.reason}
 
 
 @app.post("/mint-receipt")

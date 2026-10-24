@@ -1,113 +1,74 @@
-# ElderShield v2 — Persistent Semantic & Action-Intent Firewall
+# ElderShield — a payment guardian for older adults
 
-A 100% local, privacy-preserving defensive agent for consumer elder protection. It
-moves past stateless URL/signature scanning (which goes blind the moment a senior is
-coached into using their *real* bank on a *legitimate* domain) to a **stateful**
-firewall that correlates an inbound coercion signal with a high-stakes outbound
-action inside a rolling causal window — and intercepts the money movement before it
-completes.
+ElderShield sits between an older adult and their bank. It notices when they're on a call
+(FaceTime, Zoom, WhatsApp, Teams) or when a remote-control app such as AnyDesk is running,
+remembers what it has seen, and the moment they try to send money it drops a Cluely-style
+alert: *"Wait — before you send $24,500"*, with the reasons. While someone may be watching
+their screen, the alert appears in a window screen sharing can't see, and the shared screen
+shows only a "Verifying…" stall. Everything runs on this computer.
 
-## Run
+This branch focuses on calls and remote control. Email (a Gmail extension and an inbox
+watcher) and the earlier multi-panel simulator are kept on branch `main-before-oct24-afternoon`.
+
+## Run (macOS)
 
 ```bash
 pip install -r requirements.txt
-python server.py
-# open http://127.0.0.1:8777
+python server.py                                    # then open http://127.0.0.1:8777
+python device_watch.py                              # second terminal: watches calls and remote control
+python device_watch.py --pretend facetime,anydesk   # or rehearse without a real call
 ```
 
-Optional local LLM enrichment (the INTERCEPT decision never depends on it):
+Every 2 s `device_watch.py` tells the server whether a call is live (a call app running while
+the microphone is in use; FaceTime also carries iPhone calls on a Mac) and which remote-control
+apps are running (AnyDesk, TeamViewer, ScreenConnect, …). It needs no macOS permissions: it reads
+the process list and whether the microphone is in use, never audio or screen contents.
+`--speak` also says alerts aloud; use it only with headphones, or the caller hears it.
 
-```bash
-ollama serve &
-ollama pull llama3.2:3b          # or set ELDERSHIELD_MODEL
-```
+## The demo
 
-The demo runs fully without Ollama — the deterministic scorer is authoritative and
-stays inside the 250 ms budget; the LLM only refines the whisper text when it's up
-and there's time left in the budget.
+1. A teammate FaceTimes the "senior", posing as the bank's fraud team, and asks them to install
+   AnyDesk "to secure the account". The pill at the top shows **FaceTime call · AnyDesk**.
+2. The senior opens the bank page and sends a $24,500 wire to the "safe account".
+3. ElderShield pauses it. Their screen shows *"Wait — before you send $24,500"* and why; anyone
+   watching a screen share sees only "Verifying transaction details…".
+4. "Don't send" is the easy choice. "Send anyway" unlocks once the call ends and AnyDesk is closed.
+
+Check the screen-sharing part on the demo Mac before you rely on it: start a QuickTime screen
+recording, or share your screen on a call, while the alert is up. The recording should show the
+stall but not the alert. `macos/eldershield-warning "Test" "Body" --visible-to-capture` shows the
+same window without the protection, for comparison.
+
+## The alert, and "Send anyway"
+
+- Nothing pops up when nothing is wrong.
+- **CHALLENGE** (medium risk, e.g. a new-payee wire during a call): the alert, and "Send anyway"
+  works at once.
+- **INTERCEPT** (high risk, e.g. a call plus remote control): "Send anyway" unlocks once the call
+  ends and remote control is closed. A scammer's hold depends on keeping the senior on the line,
+  so this breaks it without blocking them. The release works once, for that exact payment
+  (kind, place, amount, destination), and every release is recorded.
+- What the device adds to the score: live call +15, remote control running +30, remote control
+  seen earlier today +15 (scammers often disconnect just before the transfer).
+
+## Privacy, and who may call the server
+
+- The server answers only its own page: requests with a foreign `Origin` or a non-local `Host`
+  (DNS rebinding) get a 403, so a web page can't read its state, wipe it with `/reset`, or
+  release a payment. `/reset` and `/replay` are demo conveniences; remove them in production.
+- Nothing leaves the computer unless `ANTHROPIC_API_KEY` is set for the case investigator. Then
+  each call is logged *before* it is sent, with the exact request body (`GET /disclosures`).
+  Snippets are redacted first, payment details are only ever stored as salted hashes, and the
+  model's own wording is never shown to the senior.
 
 | env var | default | what it does |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | unset | enables the cloud case investigator; without it a local rule engine answers and nothing leaves the machine |
+| `ANTHROPIC_API_KEY` | unset | enables the cloud case investigator; without it a local rule engine answers |
 | `ANTHROPIC_MODEL` | `claude-opus-5-5` | model for the investigator |
-| `ELDERSHIELD_OVERRIDE_DELAY_S` | `86400` | cooling-off before an INTERCEPTed payment can be released (set e.g. `10` for a live demo) |
-| `ELDERSHIELD_ALLOWED_ORIGINS` | unset | comma-separated extra origins allowed to call the daemon, e.g. a `chrome-extension://…` id |
+| `ELDERSHIELD_ALLOWED_ORIGINS` | unset | comma-separated extra origins allowed to call the server |
 
-### Scam warnings inside Gmail (Chrome extension)
-
-1. Start the server (`python server.py`).
-2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and
-   pick the `extension/` folder.
-3. Open Gmail. Each email you open shows ElderShield's verdict right above it: a warning card
-   that says why, or a small "no warning signs" pill.
-
-It reads only the emails you open and sends them only to the ElderShield server on this
-computer, which now also knows about them, so a scam read in Gmail arms the bank-transfer
-check. It also flags links whose text shows one web address but go to another. Gmail's page
-structure isn't an official API, so a Gmail redesign could require updating `content.js`.
-
-### Watch a real inbox
-
-```bash
-ELDERSHIELD_IMAP_USER=you@gmail.com ELDERSHIELD_IMAP_PASSWORD=<app password> python email_watch.py
-```
-
-With the server running, this polls the inbox every 20 s and sends each new message through
-the same `/ingest/trigger` path as the simulator's "Receive this message" button. It is
-read-only (nothing gets marked as read) and only picks up mail that arrives after it starts.
-It needs a provider with IMAP app passwords: Gmail (with 2-Step Verification), iCloud
-(`ELDERSHIELD_IMAP_HOST=imap.mail.me.com`), Yahoo, Fastmail. Providers that require OAuth
-sign-in aren't supported. Use a throwaway inbox for demos.
-
-### Live calls and remote control on this Mac
-
-```bash
-python device_watch.py                              # real sensors
-python device_watch.py --pretend facetime,anydesk   # rehearse the demo without a real call
-```
-
-Run it next to the server. Every 2 s it tells ElderShield whether a call is live (FaceTime,
-which also carries iPhone calls on a Mac, or Zoom, WhatsApp, Teams, while the microphone is in
-use) and whether a remote-control app is running (AnyDesk, TeamViewer, ScreenConnect, …). It
-needs no macOS permissions: it reads the process list and whether the microphone is in use,
-never audio or screen contents. Scoring: live call +15, remote-control app running +30, one seen
-earlier today +15 (scammers often disconnect before the transfer). A message read during a live
-call counts as a live-call message.
-
-When a payment is intercepted while someone may be watching, the page shows only the
-"processing" stall and the truth appears in a native window that screen sharing and screen
-capture can't see (`macos/Warning.swift`, built with `swiftc` on first run). Check this on the
-demo Mac: start a QuickTime screen recording, or share your screen on a call, while the warning
-is up. The recording should show the stall but not the warning. For comparison,
-`macos/eldershield-warning "Test" "Body" --visible-to-capture` shows the same window unprotected.
-`--speak` also says the warning aloud; use it only with headphones.
-
-### Releasing a paused payment, and who may call the daemon
-
-- **CHALLENGE** → "Send it anyway" releases that payment at once. **INTERCEPT** → "I still want
-  to send this" schedules the release after the cooling-off delay, because a scammer on the
-  phone will simply tell the senior to press the button. The token works once, for that exact
-  payment (kind, site, amount, destination), and every release is recorded.
-- The daemon answers only its own UI: requests with a foreign `Origin` or a non-local `Host`
-  (DNS rebinding) get a 403, so a web page can't read case files, wipe state with `/reset`, or
-  release a payment. `/reset` and `/replay` are demo conveniences; remove them in production.
-- **What leaves the machine:** with an API key set, each investigator call is logged *before* it
-  is sent, with the exact request body, then marked sent or failed (`GET /disclosures`). Snippets
-  are redacted first (numbers, phones, emails, wallets, names); payment details are only ever
-  stored as salted hashes. The model's own wording is never shown to the senior.
-
-## The demo (one screen, three panels)
-
-1. **Tab A — the scammer.** An email + live-call transcript coaching the senior:
-   *"Don't tell Chase why you are wiring the money — just tell them it's for a roof
-   repair."* It also carries an invisible (`font-size:0`) span with an LLM prompt
-   injection. Click **Receive this message**.
-2. **Tab B — the real bank.** A genuine `chase.com` wire form. A traditional URL
-   scanner says **100% SAFE**. Fill the memo with the coached story and click **Send
-   wire**.
-3. **Defense console.** Watch the causal graph, the entity trajectory, the
-   **INTERCEPT** decision, the scammer-facing **tarpit**, the senior's **whisper
-   banner**, and the signed **Proof of Coercion** receipt.
+Optional local LLM rewording of alert text (the decision never depends on it): `ollama serve`
+and `ollama pull llama3.2:3b`.
 
 ## How the decision is made (Module 1)
 
@@ -216,15 +177,13 @@ playwright install chromium   # once, for the browser checks
 python test_e2e.py            # starts its own server; needs port 8777 free
 ```
 
-43 checks: clean-wire control, hot-path intercept and latency, plain-language
-whisper, receipt verify + tamper rejection, live state validated against
-`schemas.py`, restart rehydration, the 3-day cold path and its control, the four
-replays (A–C intercept; D, a first-time contractor paid to the invoice's own account,
-is allowed), the override's cooling-off / binding / single use, no watch-item spill
-across payment kinds, storage privacy, the origin lock, the device sensor (live call,
-remote control now and earlier, the hand-off to the private window), and a real Chromium run
-proving the `submit` is captured (no navigation), the decoy and whisper render, the
-release button schedules instead of sending, and class-hidden injection is caught.
+41 checks: the device sensor (live call, remote control now and earlier, the hand-off to the
+private window), "Send anyway" (waits while the call is live, then works once, for that exact
+payment), the origin lock, and a real Chromium run proving the payment is caught before
+submission (no navigation), the page shows only the stall while the private window has the
+alert, and "Send anyway" unlocks when the call ends. The engine underneath is covered too:
+hot-path and 3-day long-con intercepts and their controls, restart rehydration, receipts and
+tamper rejection, storage privacy, watch-item scope, and the four multi-day replays.
 If port 8777 can't be used, the suite runs in-process and reports the browser checks
 as SKIPPED.
 
@@ -305,10 +264,12 @@ all stay on disk with `0600` where the OS allows.
 
 ## Files
 
-- `server.py` — FastAPI core: causality engine (hot + long-con paths), entity store, receipts, fingerprinter, serves the UI
-- `schemas.py` — Pydantic contracts for `CrossTabCausalGraph`, `EntityTrajectoryStore`, `ProofOfCoercionReceipt`
-- `test_e2e.py` — the 15-check suite above
-- `index.html` — two-tab simulator + live defense console (no build step)
+- `server.py` — FastAPI core: causality engine (hot + long-con paths), long-term memory, device context, receipts, serves the UI
+- `device_watch.py` — macOS sensor for live calls and remote-control apps; shows the private alert window
+- `macos/Warning.swift` — the alert window screen sharing can't see (built by `device_watch.py` on first run)
+- `index.html` — the bank page with ElderShield's alert, and a "What ElderShield sees" panel (no build step)
+- `schemas.py` — Pydantic contracts for the state, case files, and receipts
+- `test_e2e.py` — the 41-check suite above
 - `requirements.txt`
 
 ## Known limits (honest)

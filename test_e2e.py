@@ -6,7 +6,6 @@ Browser checks need the live server; in-process runs report them as SKIPPED, nev
 """
 
 import json
-import os
 import sqlite3
 import subprocess
 import sys
@@ -14,9 +13,6 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-# Short cooling-off so the override test can watch a hold expire. Set before the server starts.
-os.environ["ELDERSHIELD_OVERRIDE_DELAY_S"] = "2"
 
 from schemas import (
     CrossTabCausalGraphState,
@@ -221,22 +217,23 @@ try:
     span_days = (case["observations"][-1]["ts"] - case["observations"][0]["ts"]) / 86400
     results.append(ok("replay keeps the real multi-day timeline", 1.9 < span_days < 2.1, round(span_days, 2)))
 
+    # "Send anyway": an INTERCEPT can be sent once nobody is watching (call over, remote control closed)
     b_action = rep_b["action"]
-    ovr = call("/override", {"action_id": rep_b["action_evaluation"]["action_id"]})
-    results.append(ok("override: an INTERCEPT release is scheduled, not immediate", ovr.get("status") == "scheduled"))
-    tok = ovr["override_token"]
-    results.append(ok("override: blocked during the cooling-off period",
-                      evaluate(b_action, override_token=tok)["decision"] == "INTERCEPT"))
+    call("/device/context", {"call_app": "FaceTime", "remote_access": [], "private_window": False})
+    watched = evaluate(b_action)
+    status, _ = request("/override", {"action_id": watched["action_id"]})
+    results.append(ok("send anyway: waits while the call is live", status == 409, status))
+    call("/device/context", {"call_app": None, "remote_access": [], "private_window": False})
+    tok = call("/override", {"action_id": watched["action_id"]})["override_token"]
     other = {"origin": "target.com", "action_type": "gift_card_checkout", "amount": 900, "memo": "", "new_payee": True}
-    results.append(ok("override: token does not release a different payment",
+    results.append(ok("send anyway: token does not release a different payment",
                       evaluate(other, override_token=tok)["decision"] != "ALLOW"))
-    time.sleep(2.5)
     released = evaluate(b_action, override_token=tok)
     results.append(ok("v3: Senior override prevents inescapable intercept loops",
                       released["decision"] == "ALLOW" and released["path"] == "override"))
-    results.append(ok("override: token is single-use", evaluate(b_action, override_token=tok)["decision"] != "ALLOW"))
+    results.append(ok("send anyway: token is single-use", evaluate(b_action, override_token=tok)["decision"] != "ALLOW"))
     status, _ = request("/override", {"action_id": "act_unknown"})
-    results.append(ok("override: refused for an unknown payment", status == 404, status))
+    results.append(ok("send anyway: refused for an unknown payment", status == 404, status))
 
     rep_c = call("/replay/scenario_c", {})
     results.append(ok("v3: Scenario C replay INTERCEPTs gift card checkout",
@@ -295,10 +292,9 @@ try:
     results.append(ok("DNS-rebinding host is refused", status == 403, status))
 
     # 8) Browser verification (needs the live server)
-    browser_checks = ["browser: class-hidden injection caught via computed style",
-                      "browser: decoy + whisper shown, no navigation",
-                      "browser: release button schedules instead of sending, no navigation",
-                      "browser: with the device sensor, the page shows only the stall"]
+    browser_checks = ["browser: with someone watching and the sensor's private window, the page shows only the stall",
+                      "browser: the alert's 'Send anyway' waits for the call to end, then sends once",
+                      "browser: the form never submits natively (no navigation)"]
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -306,34 +302,30 @@ try:
     if not srv or sync_playwright is None:
         skipped += browser_checks
     else:
-        call("/reset", {})
+        alert_js = "document.getElementById('es-alert').shadowRoot.getElementById('anyway')"
         with sync_playwright() as pw:
             page = pw.chromium.launch().new_page()
+            call("/reset", {})
+            call("/device/context", {"call_app": "FaceTime", "remote_access": ["AnyDesk"], "private_window": True})
             page.goto(B)
-            page.click("text=Receive this message")
-            page.wait_for_selector("#triggerOut >> text=Ingested")
-            page.uncheck("#audio")
             page.click("button[type=submit]")
             page.wait_for_selector("#decoy", state="visible")
-            whisper = page.evaluate("document.getElementById('es-whisper').shadowRoot.textContent")
-            results.append(ok(browser_checks[0], "hidden_llm_injection" in page.inner_text("#triggerOut")))
-            results.append(ok(browser_checks[1], page.url.rstrip("/") == B and "fake" in whisper))
-            page.screenshot(path=str(HERE / "demo_intercept.png"), full_page=True)
-            page.evaluate("document.getElementById('es-whisper').shadowRoot.getElementById('btnOverride').click()")
-            page.wait_for_timeout(800)
-            whisper = page.evaluate("document.getElementById('es-whisper').shadowRoot.textContent")
-            results.append(ok(browser_checks[2], page.url.rstrip("/") == B and "on hold until" in whisper))
+            results.append(ok(browser_checks[0], page.evaluate("!document.getElementById('es-alert')")))
 
             call("/reset", {})
-            call("/device/context", {"call_app": "FaceTime", "remote_access": [], "private_window": True})
+            call("/device/context", {"call_app": "FaceTime", "remote_access": ["AnyDesk"], "private_window": False})
             page.goto(B)
-            page.click("text=Receive this message")
-            page.wait_for_selector("#triggerOut >> text=Ingested")
-            page.uncheck("#audio")
             page.click("button[type=submit]")
-            page.wait_for_selector("#decoy", state="visible")
-            results.append(ok(browser_checks[3], page.evaluate("!document.getElementById('es-whisper')")))
+            page.wait_for_selector("#es-alert")
+            locked = page.evaluate(alert_js + ".disabled")
+            page.wait_for_timeout(400)                    # let the card finish fading in
+            page.screenshot(path=str(HERE / "demo_intercept.png"), full_page=True)
             call("/device/context", {"call_app": None, "remote_access": [], "private_window": False})
+            page.wait_for_function("!" + alert_js + ".disabled", timeout=6000)
+            page.evaluate(alert_js + ".click()")
+            page.wait_for_function("document.getElementById('actionOut').textContent.startsWith('Sent ')", timeout=6000)
+            results.append(ok(browser_checks[1], locked and page.inner_text("#actionOut").startswith("Sent")))
+            results.append(ok(browser_checks[2], page.url.rstrip("/") == B))
 finally:
     if srv:
         srv.terminate()
