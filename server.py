@@ -60,7 +60,7 @@ REMOTE_ACCESS_MEMORY_S = 24 * 3600               # scammers often disconnect jus
 OVERRIDE_WINDOW_S = 15 * 60                      # how long a "Send anyway" release stays usable
 HISTORY_DAYS = 90                                # how far back the memory looks
 RECENT_ASK_S = 24 * 3600                         # "asked you for money on a call" counts for a day
-ASSESS_EVERY_S = float(os.environ.get("ELDERSHIELD_ASSESS_EVERY_S", "5"))   # Jev re-judges a live call this often
+ASSESS_EVERY_S = float(os.environ.get("ELDERSHIELD_ASSESS_EVERY_S", "2"))   # Jev re-judges a live call this often
 
 DAY = 86400
 

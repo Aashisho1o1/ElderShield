@@ -82,14 +82,14 @@ set -a; source .env; set +a; python server.py
 `TYPESAFE_API_KEY` works the same way against TypeSafe's own API. Without a key the rules run alone.
 Labels Jev added show a small "·jev" tag on the call. Cost: about $0.00002 per sentence.
 
-**Jev also judges the whole relationship.** Every 5 s during a call (and the moment a new warning
+**Jev also judges the whole relationship.** Every 2 s during a call (and the moment a new warning
 sign lands, and once more when the call ends) Jev reads the caller's history from the journal as
 evidence (days known, calls per week and their length, late-night calls, the warning signs in
 order, the amounts asked, payments made; never any words) and answers: how likely is fraud, is the
 caller steering toward money, isolating her, are the asks escalating, and which scam pattern this
 fits. The verdict sits on the caller's card ("Jev: 97% fraud · a romance scam") and, when a payment
 is attempted, becomes the long-term component of the score with the rule-based ladder as its floor,
-so a Jev outage never weakens the rules. `ELDERSHIELD_ASSESS_EVERY_S` changes the interval.
+so a Jev outage never weakens the rules. `ELDERSHIELD_ASSESS_EVERY_S` changes the interval. Alerts stay on screen until she presses **Got it**; a newer alert replaces an older one.
 
 When that judgment crosses a line during a call, she gets an alert of its own, once per call:
 *"This call fits how romance scams work (96% sure). Daniel has known you 20 days, called 6 times

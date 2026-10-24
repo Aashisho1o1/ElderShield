@@ -74,5 +74,5 @@ window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 if hiddenFromCapture { window.sharingType = .none }
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
-Timer.scheduledTimer(withTimeInterval: 180, repeats: false) { _ in NSApp.terminate(nil) }   // don't linger
+// Stays until she presses the button; device_watch.py replaces it when a newer alert arrives.
 app.run()

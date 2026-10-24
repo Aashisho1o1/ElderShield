@@ -319,7 +319,6 @@ function showAlert(res){
 function showLive(a){
   const root=card({title:a.title, items:[], note:a.body, red:true, buttons:['Got it']});
   root.getElementById('primary').onclick=closeAlert;
-  setTimeout(()=>{ const h=document.getElementById('es-alert'); if(h && h.shadowRoot===root) closeAlert(); }, 20000);
 }
 
 function waitForNobody(then){
