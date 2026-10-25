@@ -9,7 +9,7 @@ built for the slow scams, the ones that take weeks, and for the people she choos
 Fraud against older adults is now one of the largest transfers of wealth in America, and most of
 it is never reported.
 
-- The FTC's report to Congress ([*Protecting Older Consumers 2025–2026*](https://www.ftc.gov/reports),
+- The FTC's report to Congress ([*Protecting Older Consumers 2025–2026*](https://www.ftc.gov/reports/protecting-older-consumers-2025-2026-report-federal-trade-commission),
   October 2026) puts the **true cost of fraud to older adults in 2025 at $13.3 billion to
   $119.5 billion**. Reported losses alone reached $3 billion, five times the 2020 figure, and 6% of
   reports — losses of $100,000 or more — account for 70% of the money.
