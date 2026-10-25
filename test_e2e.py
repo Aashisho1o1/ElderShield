@@ -260,6 +260,17 @@ try:
     device()
     calls = call("/state")["track"]["recent_calls"]
     ok("the call closes when it ends", not calls[0]["live"])
+    # the Mac names a call in its history a moment after it connects, so the sensor's first guess
+    # can be the previous caller; a correction early in the call moves the call and what was heard
+    call("/reset", {})
+    device("FaceTime", caller="Caller ending 3141")
+    heard("My love, I need you to send money today.")
+    device("FaceTime", caller="Daniel")
+    calls, people = call("/state")["track"]["recent_calls"], call("/state")["track"]["contacts"]
+    ok("an early correction of the caller moves the call, and what was heard, to the right person",
+       calls[0]["who"] == "Daniel" and {h["label"] for h in calls[0]["heard"]} >= {"endearment", "money_request"}
+       and all(c["name"] != "Caller ending 3141" for c in people), [c["name"] for c in people])
+    device()
 
     # 4) the long-term track: a 3-week romance scam
     call("/demo/seed", {})

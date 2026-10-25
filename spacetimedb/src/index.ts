@@ -172,6 +172,22 @@ export const endCall = spacetimedb.reducer(
     if (c) ctx.db.callLog.id.update({ ...c, ended, live: false });
   });
 
+/** The Mac writes a call to its history a moment after the call connects, so the name read at the
+ *  start can be the previous caller's. When the sensor learns better early in the call, the call,
+ *  its signals and its judgments move to the right person. */
+export const reassignCall = spacetimedb.reducer(
+  { id: t.string(), contact_id: t.string() },
+  (ctx, { id, contact_id }) => {
+    daemonOnly(ctx);
+    const c = ctx.db.callLog.id.find(id);
+    if (!c || c.contact_id === contact_id) return;
+    ctx.db.callLog.id.update({ ...c, contact_id });
+    for (const s of [...ctx.db.signal.call_id.filter(id)]) ctx.db.signal.key.update({ ...s, contact_id });
+    for (const a of [...ctx.db.assessment.iter()]) {
+      if (a.call_id === id) ctx.db.assessment.id.update({ ...a, contact_id });
+    }
+  });
+
 export const setCallRemoteAccess = spacetimedb.reducer(
   { id: t.string(), remote_access: t.string() },
   (ctx, { id, remote_access }) => {

@@ -7,6 +7,8 @@
 #   ./start.sh --check    only the checks, including a 10-second listener self-test (it speaks a test line
 #                         through the Mac's speaker and shows what the listener heard)
 #   ./start.sh --quick    start without the listener self-test
+#   ./start.sh --watch    start, then stay in the foreground and restart anything that dies, within 5 s
+#                         (the one to run in a Terminal window during a demo)
 #   ./start.sh --stop     stop the daemon, sensor, listener and family page (the database keeps running)
 #
 # Logs go to logs/. Jev needs OPENROUTER_API_KEY in .env (git-ignored); without it the phrase rules run alone.
@@ -53,6 +55,10 @@ fi
 
 echo "ElderShield"
 echo "— prerequisites"
+FREE_KB=$(df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}'); FREE_KB=${FREE_KB:-0}
+if [ "$FREE_KB" -lt 3000000 ]; then say_bad "only $((FREE_KB / 1048576)) GB of disk left: the database stops writing when the disk fills (it did once). Free space first."
+elif [ "$FREE_KB" -lt 8000000 ]; then say_warn "$((FREE_KB / 1048576)) GB of disk left: fine for now, but macOS can eat that in a day"
+else say_ok "$((FREE_KB / 1048576)) GB of disk free"; fi
 command -v spacetime >/dev/null || { say_bad "spacetime CLI not found: curl -sSf https://install.spacetimedb.com | sh"; exit 1; }
 python3 -c "import fastapi, uvicorn, pydantic" 2>/dev/null && say_ok "python deps" || { say_bad "pip3 install -r requirements.txt"; exit 1; }
 command -v swiftc >/dev/null && say_ok "swiftc (builds the alert window and listener)" || say_bad "swiftc missing: xcode-select --install"
@@ -149,5 +155,22 @@ if [ $PROBLEMS -eq 0 ]; then
   echo "      after ./start.sh --stop of the sensor) → send the \$8,500 wire."
 else
   echo "$PROBLEMS problem(s) above. Fix them before the demo; ./start.sh --check re-runs the checks."
-  exit 1
+  [ "$MODE" = "--watch" ] || exit 1
+fi
+
+if [ "$MODE" = "--watch" ]; then
+  echo
+  echo "Watching. Anything that dies is restarted within 5 s; a line here says what and when. Ctrl-C stops watching only."
+  while sleep 5; do
+    DOWN=""
+    up "$STDB/v1/ping" || DOWN="$DOWN database"
+    up "$DAEMON/health" || DOWN="$DOWN daemon"
+    pgrep -f "$SENSOR_RE" >/dev/null || DOWN="$DOWN sensor"
+    up "http://127.0.0.1:$FAMILY_PORT/" || DOWN="$DOWN family-page"
+    if [ -n "$DOWN" ]; then
+      echo "$(date +%H:%M:%S) down:$DOWN — restarting"
+      ELDERSHIELD_CALLER="$CALLER" sh "$0" --quick 2>&1 | grep -E "started|waiting|✗" | sed 's/^/    /'
+      df -k /System/Volumes/Data | awk 'NR==2 && $4 < 2000000 {printf "    ! only %.1f GB of disk left: the database stops when the disk fills\n", $4/1048576}'
+    fi
+  done
 fi

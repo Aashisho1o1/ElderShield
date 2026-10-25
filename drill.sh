@@ -5,6 +5,9 @@
 # restarts the local SpacetimeDB, so not while a call is live).
 cd "$(dirname "$0")" || exit 1
 PATH="$HOME/.local/bin:$PATH"
+if pgrep -f "sh (\./)?start\.sh --watch" >/dev/null; then
+  echo "./start.sh --watch is running: it would restart what this drill kills. Ctrl-C it first, then run the drill."; exit 1
+fi
 D=http://127.0.0.1:8777
 # the same anchored process patterns start.sh uses (a shell merely mentioning these names must not count)
 DAEMON_RE='^([^ ]*/)?[Pp]ython[0-9.]* ([^ ]*/)?server\.py'

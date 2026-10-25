@@ -64,6 +64,7 @@ ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS} | EXTENSION_ORIGINS
 
 KEEP_SNIPPETS = os.environ.get("ELDERSHIELD_SNIPPETS", "1") != "0"   # the flagged sentence, for her record
 DEVICE_REPORT_TTL_S = 6                          # the sensor reports every 2 s
+CALLER_SETTLES_S = 60                            # how long into a call its caller may still be corrected
 REMOTE_ACCESS_MEMORY_S = 24 * 3600               # scammers often disconnect just before the transfer
 OVERRIDE_WINDOW_S = 15 * 60                      # how long a "Send anyway" release stays usable
 HISTORY_DAYS = 90                                # how far back the memory looks
@@ -351,10 +352,16 @@ class Store(Spacetime):
                       json.dumps(report["remote_access"]))
         elif open_call and not report.get("call_app"):
             self.call("end_call", open_call["id"], at)
-        elif open_call and report["remote_access"]:
-            seen = sorted(set(json.loads(open_call["remote_access"])) | set(report["remote_access"]))
-            if seen != json.loads(open_call["remote_access"]):
-                self.call("set_call_remote_access", open_call["id"], json.dumps(seen))
+        elif open_call:
+            if report["remote_access"]:
+                seen = sorted(set(json.loads(open_call["remote_access"])) | set(report["remote_access"]))
+                if seen != json.loads(open_call["remote_access"]):
+                    self.call("set_call_remote_access", open_call["id"], json.dumps(seen))
+            # The Mac's call history names a call a moment after it connects, so the sensor may learn
+            # who it is only a few seconds in; early in the call, the journal entry follows.
+            caller = report.get("caller")
+            if caller and at - open_call["started"] < CALLER_SETTLES_S and salted_hash(caller) != open_call["contact_id"]:
+                self.call("reassign_call", open_call["id"], self._contact(caller, open_call["started"]))
 
     def _contact(self, caller: Optional[str], at: float) -> str:
         cid = salted_hash(caller) if caller else "unknown"

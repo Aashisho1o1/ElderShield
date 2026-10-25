@@ -207,7 +207,7 @@ def watch(args, pretend, private_window: bool, listener: bool) -> None:
     last_alert, last_state, reachable, caller = time.time(), None, None, None
     window = None
     script_stop = threading.Event()
-    call_started_at = None
+    call_started_at, listener_checked = None, False
     while True:
         try:
             state = sense(pretend)
@@ -215,13 +215,20 @@ def watch(args, pretend, private_window: bool, listener: bool) -> None:
             ended = not state["call_app"] and (last_state or {}).get("call_app")
             if started:
                 caller = args.caller or latest_caller()
-                call_started_at = time.time()
+                call_started_at, listener_checked = time.time(), False
                 if listener:
                     (MACOS / "listen.log").unlink(missing_ok=True)
                     subprocess.run(["open", "-n", str(LISTEN_APP), "--args", "--post", DAEMON + "/calls/transcript",
                                     "--log", str(MACOS / "listen.log"), *(["--allow-cloud"] if args.allow_cloud else [])])
-            if listener and state["call_app"] and call_started_at and 10 < time.time() - call_started_at < 12:
-                problem = listener_hearing()           # ten seconds in, the listener must be hearing the call
+            elif state["call_app"] and not args.caller and time.time() - call_started_at < 30:
+                # the Mac writes the call to its history a moment after it connects: keep looking early on
+                found = latest_caller()
+                if found and found != caller:
+                    caller = found
+                    print(f"  the call is with {caller}")
+            if listener and state["call_app"] and not listener_checked and time.time() - call_started_at >= 10:
+                listener_checked = True                # ten seconds in, the listener must be hearing the call
+                problem = listener_hearing()
                 print(f"  listener: {'hearing the call' if not problem else 'NOT HEARING THE CALL: ' + problem}")
                 if args.script:
                     script_stop.clear()
