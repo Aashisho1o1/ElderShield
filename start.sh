@@ -71,6 +71,9 @@ fi
 
 echo "— daemon"
 if up "$DAEMON/health"; then say_ok "daemon answering at $DAEMON"
+elif pgrep -f "[Pp]ython3? server.py" >/dev/null; then       # started before the database: it waits, then connects
+  wait_for "$DAEMON/health" 25 "the already-running daemon" && say_ok "daemon was waiting for the database; now answering" \
+    || { say_bad "a daemon process exists but never answered: ./start.sh --stop, then ./start.sh (logs/server.log)"; }
 elif [ "$MODE" = "--check" ]; then say_bad "daemon not running (python3 server.py)"
 elif lsof -nP -iTCP:"${ELDERSHIELD_PORT:-8777}" -sTCP:LISTEN >/dev/null 2>&1; then
   say_bad "port ${ELDERSHIELD_PORT:-8777} is taken by something that isn't answering: $(lsof -nP -tiTCP:"${ELDERSHIELD_PORT:-8777}" -sTCP:LISTEN | head -1) — ./start.sh --stop, then try again"
@@ -86,7 +89,10 @@ fi
 
 echo "— sensor (calls, remote control, listening)"
 if pgrep -f "device_watch.py" >/dev/null; then
-  pgrep -f "device_watch.py --listen" >/dev/null && say_ok "sensor running with --listen" || say_warn "sensor running WITHOUT --listen: calls are detected but not heard (./start.sh --stop, then ./start.sh)"
+  i=0; while [ $i -lt 12 ]; do [ "$(state | json "d['device']['sensor_live']")" = "True" ] && break; sleep 1; i=$((i + 1)); done
+  if [ $i -ge 12 ]; then say_bad "sensor process exists but the daemon hasn't heard from it in 12 s: ./start.sh --stop, then ./start.sh (logs/sensor.log)"
+  elif pgrep -f "device_watch.py --listen" >/dev/null; then say_ok "sensor live, listening"
+  else say_warn "sensor live but WITHOUT --listen: calls are detected but not heard (./start.sh --stop, then ./start.sh)"; fi
 elif [ "$MODE" = "--check" ]; then say_bad "sensor not running (python3 device_watch.py --listen)"
 else
   nohup python3 -u device_watch.py --listen >logs/sensor.log 2>&1 &
@@ -109,12 +115,18 @@ if [ "$MODE" != "--quick" ]; then
   echo "— listener self-test (12 s: the Mac speaks a test line; the listener must hear and transcribe it)"
   if pgrep -f "Listen.app/Contents/MacOS/listen --post" >/dev/null; then say_warn "a call is live right now; skipping the self-test"
   else
-    ( sleep 4; say -r 180 "I'm a bit short until my pension clears. Could you help me out?" ) &
-    macos/capture-test.sh --seconds 12 >logs/listener-selftest.log 2>&1
-    grep -q "✓ tapping system audio" logs/listener-selftest.log && say_ok "system audio tap allowed" || say_bad "system audio tap refused: System Settings → Privacy & Security → Screen & System Audio Recording → allow 'ElderShield listener'"
-    grep -q "✓ speech is transcribed on this Mac" logs/listener-selftest.log && say_ok "on-device speech allowed" || say_bad "speech recognition not allowed or model missing: see logs/listener-selftest.log"
-    T=$(grep "RESULT: transcript" logs/listener-selftest.log | sed 's/.*→ //')
-    case "$T" in *pension*) say_ok "heard: $T";; "") say_bad "heard nothing: is the Mac's volume up? (the listener hears the speaker output)";; *) say_warn "heard: $T";; esac
+    : >logs/listener-selftest.log
+    # speak only once the tap is confirmed live (the listener's launch time varies), then give it
+    # a quiet second so the recognizer rotates its first chunk before the sentence starts
+    ( i=0; while [ $i -lt 100 ] && ! grep -q "✓ tapping system audio" logs/listener-selftest.log 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
+      sleep 1; say -r 180 "I'm a bit short until my pension clears. Could you help me out?" ) &
+    macos/capture-test.sh --seconds 14 >logs/listener-selftest.log 2>&1
+    sleep 2                                   # the listener writes its RESULT lines 1.5 s after it stops
+    L=macos/capture-test.log                  # the listener's own log; the tail above can miss its last lines
+    grep -q "✓ tapping system audio" $L && say_ok "system audio tap allowed" || say_bad "system audio tap refused: System Settings → Privacy & Security → Screen & System Audio Recording → allow 'ElderShield listener'"
+    grep -q "✓ speech is transcribed on this Mac" $L && say_ok "on-device speech allowed" || say_bad "speech recognition not allowed or model missing: see $L"
+    T=$(grep "RESULT: transcript" $L | sed 's/.*→ //'); [ -n "$T" ] || T=$(grep "  transcript: " $L | tail -1 | sed 's/.*transcript: //')
+    case "$T" in *pension*) say_ok "heard: $T";; "") say_bad "heard nothing: is the Mac muted or on headphones? (the listener hears the speaker output; see $L)";; *) say_warn "heard: $T";; esac
   fi
 fi
 

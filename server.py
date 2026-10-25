@@ -325,7 +325,7 @@ class Store(Spacetime):
             except SpacetimeError as e:
                 if e.status == 0 and attempt < 59:
                     if attempt == 0:
-                        print(f"Waiting for SpacetimeDB at {SPACETIME_URL}… (spacetime start)")
+                        print(f"Waiting for SpacetimeDB at {SPACETIME_URL}… (spacetime start)", flush=True)
                     time.sleep(1)
                     continue
                 hint = {404: f"the module isn't published: spacetime publish {SPACETIME_DB} --server local",
