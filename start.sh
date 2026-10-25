@@ -56,8 +56,9 @@ fi
 echo "ElderShield"
 echo "— prerequisites"
 FREE_KB=$(df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}'); FREE_KB=${FREE_KB:-0}
-if [ "$FREE_KB" -lt 3000000 ]; then say_bad "only $((FREE_KB / 1048576)) GB of disk left: the database stops writing when the disk fills (it did once). Free space first."
-elif [ "$FREE_KB" -lt 8000000 ]; then say_warn "$((FREE_KB / 1048576)) GB of disk left: fine for now, but macOS can eat that in a day"
+# the app itself needs almost nothing; the only real risk is a completely full disk, where the database can't write
+if [ "$FREE_KB" -lt 1000000 ]; then say_bad "under 1 GB of disk left: the database stops writing when the disk fills. Empty the Trash or clear a cache, then carry on."
+elif [ "$FREE_KB" -lt 3000000 ]; then say_warn "$((FREE_KB / 1048576)) GB of disk left: enough for the demo; free some space when you can"
 else say_ok "$((FREE_KB / 1048576)) GB of disk free"; fi
 command -v spacetime >/dev/null || { say_bad "spacetime CLI not found: curl -sSf https://install.spacetimedb.com | sh"; exit 1; }
 python3 -c "import fastapi, uvicorn, pydantic" 2>/dev/null && say_ok "python deps" || { say_bad "pip3 install -r requirements.txt"; exit 1; }
@@ -170,7 +171,7 @@ if [ "$MODE" = "--watch" ]; then
     if [ -n "$DOWN" ]; then
       echo "$(date +%H:%M:%S) down:$DOWN — restarting"
       ELDERSHIELD_CALLER="$CALLER" sh "$0" --quick 2>&1 | grep -E "started|waiting|✗" | sed 's/^/    /'
-      df -k /System/Volumes/Data | awk 'NR==2 && $4 < 2000000 {printf "    ! only %.1f GB of disk left: the database stops when the disk fills\n", $4/1048576}'
+      df -k /System/Volumes/Data | awk 'NR==2 && $4 < 1000000 {printf "    ! only %.1f GB of disk left: the database stops when the disk fills\n", $4/1048576}'
     fi
   done
 fi
