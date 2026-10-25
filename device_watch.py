@@ -190,10 +190,24 @@ def main() -> None:
             subprocess.run(["pkill", "-f", str(LISTEN_APP / "Contents/MacOS/listen")])
 
 
+def listener_hearing() -> str | None:
+    """What's wrong with the listener, from its log, or None if it is tapping audio and transcribing."""
+    try:
+        log = (MACOS / "listen.log").read_text()
+    except OSError:
+        return "the listener didn't start (no listen.log)"
+    if "✓ tapping system audio" not in log:
+        return "no system-audio permission: System Settings → Privacy & Security → Screen & System Audio Recording → ElderShield listener"
+    if "transcribed" not in log:
+        return "speech recognition not allowed or the on-device model is missing (see macos/listen.log)"
+    return None
+
+
 def watch(args, pretend, private_window: bool, listener: bool) -> None:
     last_alert, last_state, reachable, caller = time.time(), None, None, None
     window = None
     script_stop = threading.Event()
+    call_started_at = None
     while True:
         try:
             state = sense(pretend)
@@ -201,9 +215,14 @@ def watch(args, pretend, private_window: bool, listener: bool) -> None:
             ended = not state["call_app"] and (last_state or {}).get("call_app")
             if started:
                 caller = args.caller or latest_caller()
+                call_started_at = time.time()
                 if listener:
+                    (MACOS / "listen.log").unlink(missing_ok=True)
                     subprocess.run(["open", "-n", str(LISTEN_APP), "--args", "--post", DAEMON + "/calls/transcript",
                                     "--log", str(MACOS / "listen.log"), *(["--allow-cloud"] if args.allow_cloud else [])])
+            if listener and state["call_app"] and call_started_at and 10 < time.time() - call_started_at < 12:
+                problem = listener_hearing()           # ten seconds in, the listener must be hearing the call
+                print(f"  listener: {'hearing the call' if not problem else 'NOT HEARING THE CALL: ' + problem}")
                 if args.script:
                     script_stop.clear()
                     threading.Thread(target=play_script, args=(args.script, script_stop), daemon=True).start()

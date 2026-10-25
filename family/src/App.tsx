@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useSpacetimeDB, useTable, useReducer } from 'spacetimedb/react';
 import { tables, reducers } from './module_bindings';
 
@@ -85,7 +85,7 @@ function Join() {
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Shell({ children }: { children: ReactNode }) {
   return (
     <main>
       <header><span className="dot" /><b>ElderShield</b><span className="muted"> · her circle</span></header>

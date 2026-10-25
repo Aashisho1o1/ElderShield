@@ -9,7 +9,7 @@ It runs on her Mac and does three things:
 1. **Watches the moment.** It knows when she's on a FaceTime, Zoom, WhatsApp or phone call (and
    with whom, when the Mac's call history allows), and whether a remote-control app such as
    AnyDesk is running.
-2. **Keeps a journal** of her calls in a local SQLite database: who, when, how long, and (if
+2. **Keeps a journal** of her calls: who, when, how long, and (if
    listening is on) the warning signs heard, such as loving words from a new contact, excuses not
    to video, "don't tell your daughter", requests for money, gift cards, crypto or a code. Only the
    flagged sentence is kept, with long numbers removed; never the call.
@@ -39,6 +39,16 @@ her circle can reach it.
 ```bash
 pip install -r requirements.txt
 curl -sSf https://install.spacetimedb.com | sh          # the SpacetimeDB CLI, once
+(cd family && npm install)                                # her circle's page, once
+./start.sh                                                # everything, in order, with a check at each step
+```
+
+`start.sh` starts whatever isn't running (database → module → daemon → sensor with `--listen` → family
+page), then proves the listener can hear by speaking a test line through the Mac and showing what it
+transcribed. `./start.sh --check` only checks; `./start.sh --stop` stops the app (the database keeps
+running). The daemon waits up to a minute for the database, so the start order doesn't matter. By hand:
+
+```bash
 spacetime start                                           # terminal 1: the database
 spacetime publish eldershield --server local              # once, and after editing the module
 python server.py                                          # terminal 2: then open http://127.0.0.1:8777
@@ -173,14 +183,21 @@ gift cards or crypto asked on a call in the last day +35; a caller's long-term p
 ## Tests
 
 ```bash
-playwright install chromium   # once, for the browser checks
-python test_e2e.py            # starts its own server; needs port 8777 free
+playwright install chromium          # once, for the browser checks
+python test_e2e.py                   # needs `spacetime start` running, and ports 8778 and 5175 free
+python test_e2e.py --jev --restarts  # also one Jev check (key in .env), and a database restart under everything
 ```
 
-27 checks: the four moments (call, remote control, both, neither), "Send anyway" rules, the journal
-(calls open and close, what was heard, snippets without numbers, live alerts once), the three-week
-romance track and its effect on a payment, the origin lock, and real-browser checks of the stall,
-the unlock and the memory panel.
+The suite publishes the module to its own database (`eldershield-test`; the demo's `eldershield` is
+untouched), then starts its own daemon and its own copy of her circle's page, with Jev off so every
+check is deterministic. 56 checks: the four moments (call, remote control, both, neither), "Send
+anyway" rules, the journal (calls open and close, what was heard, snippets without numbers, live
+alerts once), the three-week romance track and its effect on a payment, the origin lock, her circle
+(hers to change, kept through Reset; a stranger gets no rows from the database and can't write it),
+and real-browser checks of the stall, the unlock, the memory panel, her circle on her page, and a
+family member's page: joining by code, the paused payment arriving live, one press reaching her
+window, warnings only while she shares them, removal emptying the page. `--restarts` is off by
+default because it kills and restarts the SpacetimeDB server everything else on the machine uses.
 
 ## Files
 

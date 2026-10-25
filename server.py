@@ -54,7 +54,7 @@ INDEX_PATH = HERE / "index.html"
 SPACETIME_URL = os.environ.get("SPACETIME_URL", "http://127.0.0.1:3000").rstrip("/")
 SPACETIME_DB = os.environ.get("SPACETIME_DB", "eldershield")
 ELDER_NAME = os.environ.get("ELDERSHIELD_NAME", "Margaret")      # how her circle sees her named
-PORT = 8777
+PORT = int(os.environ.get("ELDERSHIELD_PORT", "8777"))           # the test suite runs its own daemon on 8778
 
 # Only the daemon's own page (and an allowlisted extension origin, if configured) may call it.
 # The Host check stops DNS-rebinding pages that resolve their own name to 127.0.0.1.
@@ -129,9 +129,9 @@ def ago(seconds: float) -> str:
 # What was said: labels for a piece of call transcript
 # --------------------------------------------------------------------------- #
 
-# Each label: (phrases, confidence). The rules are the floor and work offline; with a
-# TYPESAFE_API_KEY, Jev (jev.py) also hears each finished sentence and adds the labels the rules
-# miss, with a calibrated probability each.
+# Each label: (phrases, confidence). The rules are the floor and work offline; with a key
+# (see jev.py), Jev also hears each finished sentence and adds the labels the rules miss, with a
+# calibrated probability each.
 LEXICON: dict[str, tuple[list[str], float]] = {
     "endearment": (["my love", "darling", "sweetheart", "my dear", "soulmate", "soul mate", "my queen",
                     "my king", "i love you", "love of my life", "falling for you", "my angel"], 0.8),
@@ -313,7 +313,25 @@ class Store(Spacetime):
         self._alerted: set[tuple[str, str]] = set()     # (call, label) already alerted
         self._asked_jev: set[tuple[str, str]] = set()   # (call, sentence) Jev has already been asked about
         self._family_seen: set[int] = set()             # family alerts whose acknowledgement she has been told of
-        self.call("ensure_household", ELDER_NAME, now_ts())
+        self._open()
+
+    def _open(self) -> None:
+        """Reach the database (waiting up to a minute for it to start, so the start order doesn't
+        matter) and say in plain words what is wrong if it can't be reached."""
+        for attempt in range(60):
+            try:
+                self.call("ensure_household", ELDER_NAME, now_ts())
+                return
+            except SpacetimeError as e:
+                if e.status == 0 and attempt < 59:
+                    if attempt == 0:
+                        print(f"Waiting for SpacetimeDB at {SPACETIME_URL}… (spacetime start)")
+                    time.sleep(1)
+                    continue
+                hint = {404: f"the module isn't published: spacetime publish {SPACETIME_DB} --server local",
+                        401: "the token is invalid: run `spacetime publish` once on this machine, or fix SPACETIME_TOKEN",
+                        530: "this token isn't the identity that published the module: republish from this machine"}
+                raise SystemExit(f"ElderShield can't use its database: {e}\n  → {hint.get(e.status, 'is `spacetime start` running?')}")
 
     # -- device and calls ----------------------------------------------------
     def update_device(self, report: dict[str, Any]) -> None:
@@ -429,12 +447,12 @@ class Store(Spacetime):
         if not call:
             return []
         new = self._record(call, chunk, text, classify(text))
-        for sentence, pos in finished_sentences(text, final):
+        for sentence, _ in finished_sentences(text, final):
             key = (call["id"], sentence)
             if key in self._asked_jev:
                 continue
             self._asked_jev.add(key)
-            jev.classify_async(sentence, lambda labels, s=sentence, p=pos, c=chunk: self.hear_from_jev(call, c, s, labels))
+            jev.classify_async(sentence, lambda labels, s=sentence, c=chunk: self.hear_from_jev(call, c, s, labels))
         return new
 
     def hear_from_jev(self, call: dict[str, Any], chunk: int, sentence: str, labels: list[tuple[str, float]]) -> None:
@@ -455,11 +473,12 @@ class Store(Spacetime):
             for label, conf, pos in found:
                 key = f"{call['id']}:{chunk}:{label}:{source}"
                 snippet = snippet_around(text, pos) if KEEP_SNIPPETS else ""
-                if key in self._heard:          # the same chunk again, usually more of the sentence
-                    if source == "rules":
-                        self.call("add_signal", key, call["id"], call["contact_id"], now_ts(), label, conf, snippet, source)
+                again = key in self._heard          # the same chunk again, usually more of the sentence
+                if again and source != "rules":     # Jev's sentence doesn't grow; nothing to update
                     continue
                 self.call("add_signal", key, call["id"], call["contact_id"], now_ts(), label, conf, snippet, source)
+                if again:
+                    continue
                 self._heard.add(key)
                 new.append({"label": label, "confidence": conf, "snippet": snippet or None, "source": source,
                             "alert": (call["id"], label) not in self._alerted and label in LIVE_ALERTS})
@@ -468,19 +487,21 @@ class Store(Spacetime):
 
     # -- private alerts, and the circle she has chosen to tell ---------------
     def push_alert(self, title: str, body: str, family: Optional[tuple[str, str, str]] = None) -> None:
-        """An alert for her private window (none if the title is empty). `family` = (kind, title,
-        body) also tells the people in her circle, in fewer words; the module shows it only to
-        those she has let in, and only the kinds she has chosen to share."""
-        if title:
-            with self._lock:
-                self.alerts.insert(0, {"ts": now_ts(), "title": title, "body": body})
-                del self.alerts[10:]
+        """An alert for her private window. `family` = (kind, title, body) also tells the people
+        in her circle, in fewer words."""
+        with self._lock:
+            self.alerts.insert(0, {"ts": now_ts(), "title": title, "body": body})
+            del self.alerts[10:]
         if family:
-            kind, ftitle, fbody = family
-            try:
-                self.call("post_family_alert", kind, ftitle, fbody, now_ts())
-            except SpacetimeError as e:
-                print(f"family alert not posted: {e}")
+            self.tell_family(*family)
+
+    def tell_family(self, kind: str, title: str, body: str) -> None:
+        """A line to her circle, through the module, which shows it only to those she has let in,
+        and only the kinds she has chosen to share."""
+        try:
+            self.call("post_family_alert", kind, title, body, now_ts())
+        except SpacetimeError as e:
+            print(f"family alert not posted: {e}")
 
     def alert_after(self, after: float) -> list[dict[str, Any]]:
         """Alerts newer than the sensor's cursor, newest first. Timestamps, not ids, so a daemon
@@ -1004,7 +1025,7 @@ def ui() -> str:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "version": "4.0.0"}
+    return {"ok": True, "version": app.version}
 
 
 @app.post("/evaluate/action")
@@ -1044,7 +1065,7 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
                              + "\n\nIt's safe to hang up. The other person only sees a “processing” screen. "
                              + "When you've hung up, press the button on the bank page.", family)
         else:
-            STORE.push_alert("", "", family)
+            STORE.tell_family(*family)
     STORE.record_payment(action_id, fp, a.action_type, a.amount, s["decision"], s["score"])
     return {
         "action_id": action_id, "decision": s["decision"], "score": s["score"],

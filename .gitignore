@@ -2,10 +2,11 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# Per-device secrets and runtime state. The server creates these on first run; never commit them.
-device_ed25519.key
+# Per-device secret, created by the server on first run; never commit it.
 device.salt
+# left behind by earlier versions (the SQLite journal, the email prototype's signing key)
 eldershield_state.db
+device_ed25519.key
 
 # compiled by device_watch.py on first run
 macos/eldershield-warning
@@ -23,3 +24,6 @@ spacetimedb/node_modules/
 spacetimedb/dist/
 family/node_modules/
 family/dist/
+
+# start.sh output
+logs/
