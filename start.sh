@@ -45,10 +45,11 @@ state() { curl -sf -m 5 "$DAEMON/state" 2>/dev/null; }
 json()  { python3 -c "import sys, json; d = json.load(sys.stdin); print($1)" 2>/dev/null; }
 
 if [ "$MODE" = "--stop" ]; then
+  pkill -f 'sh (\./)?start\.sh --watch'     # the watchdog first, or it restarts everything in 5 s
   pkill -f "$SENSOR_RE"; pkill -f "$LISTENER_RE"; pkill -f "$WARNING_RE"
   pkill -f "$DAEMON_RE"
   pkill -f "$VITE_RE"
-  echo "Stopped the daemon, sensor, listener and family page. SpacetimeDB keeps running (your data is safe);"
+  echo "Stopped the watchdog, daemon, sensor, listener and family page. SpacetimeDB keeps running (your data is safe);"
   echo "to stop it too: pkill -f spacetimedb-standalone"
   exit 0
 fi
@@ -153,7 +154,7 @@ if [ $PROBLEMS -eq 0 ]; then
   echo "Ready. Her page: $DAEMON · her circle: http://127.0.0.1:$FAMILY_PORT"
   echo "Demo: Reset → Load 3-week story → add Sarah → open the family page in a private window with her code →"
   echo "      start the call (real FaceTime, or: python3 device_watch.py --pretend facetime --caller Daniel --script demo/romance_call.txt"
-  echo "      after ./start.sh --stop of the sensor) → send the \$8,500 wire."
+  echo "      after pkill -f 'device_watch.py --listen') → send the \$8,500 wire."
 else
   echo "$PROBLEMS problem(s) above. Fix them before the demo; ./start.sh --check re-runs the checks."
   [ "$MODE" = "--watch" ] || exit 1
@@ -161,7 +162,7 @@ fi
 
 if [ "$MODE" = "--watch" ]; then
   echo
-  echo "Watching. Anything that dies is restarted within 5 s; a line here says what and when. Ctrl-C stops watching only."
+  echo "Watching. Anything that dies is restarted within 5 s; a line here says what and when. Ctrl-C stops watching (and the daemon with it): ./start.sh --watch brings it all back."
   while sleep 5; do
     DOWN=""
     up "$STDB/v1/ping" || DOWN="$DOWN database"

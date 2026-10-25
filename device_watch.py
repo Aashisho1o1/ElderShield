@@ -226,10 +226,11 @@ def watch(args, pretend, private_window: bool, listener: bool) -> None:
                 if found and found != caller:
                     caller = found
                     print(f"  the call is with {caller}")
-            if listener and state["call_app"] and not listener_checked and time.time() - call_started_at >= 10:
+            if state["call_app"] and not listener_checked and time.time() - call_started_at >= 10 and (listener or args.script):
                 listener_checked = True                # ten seconds in, the listener must be hearing the call
-                problem = listener_hearing()
-                print(f"  listener: {'hearing the call' if not problem else 'NOT HEARING THE CALL: ' + problem}")
+                if listener:
+                    problem = listener_hearing()
+                    print(f"  listener: {'hearing the call' if not problem else 'NOT HEARING THE CALL: ' + problem}")
                 if args.script:
                     script_stop.clear()
                     threading.Thread(target=play_script, args=(args.script, script_stop), daemon=True).start()

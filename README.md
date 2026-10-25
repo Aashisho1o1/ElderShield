@@ -9,7 +9,7 @@ built for the slow scams, the ones that take weeks, and for the people she choos
 Fraud against older adults is now one of the largest transfers of wealth in America, and most of
 it is never reported.
 
-- The FTC's report to Congress ([*Protecting Older Consumers 2025–2026*](https://www.ftc.gov/system/files/ftc_gov/pdf/2026-older-adults-report-10192026.pdf),
+- The FTC's report to Congress ([*Protecting Older Consumers 2025–2026*](https://www.ftc.gov/reports),
   October 2026) puts the **true cost of fraud to older adults in 2025 at $13.3 billion to
   $119.5 billion**. Reported losses alone reached $3 billion, five times the 2020 figure, and 6% of
   reports — losses of $100,000 or more — account for 70% of the money.
@@ -93,9 +93,10 @@ programmer.
 ## Run (macOS)
 
 ```bash
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 curl -sSf https://install.spacetimedb.com | sh          # the SpacetimeDB CLI, once
 (cd family && npm install)                                # her circle's page, once
+(cd spacetimedb && npm install)                            # the database module's build tools, once
 ./start.sh                                                # everything, in order, with a check at each step
 ```
 
@@ -121,8 +122,8 @@ Each part can also be run by hand:
 ```bash
 spacetime start                                           # the database
 spacetime publish eldershield --server local              # once, and after editing the module
-python server.py                                          # the daemon → http://127.0.0.1:8777
-python device_watch.py --listen                           # the sensor; without --listen, calls are detected but not heard
+python3 server.py                                          # the daemon → http://127.0.0.1:8777
+python3 device_watch.py --listen                           # the sensor; without --listen, calls are detected but not heard
 cd family && npm run dev                                  # her circle's page → http://127.0.0.1:5174
 ```
 
@@ -134,20 +135,20 @@ named. Listening asks macOS once for System Audio Recording and Speech Recogniti
 
 ## The demo
 
-1. Click **Load 3-week story**. Daniel's card fills in: 13 calls in 20 days, later and longer, every
+1. Click **Load 3-week story**. Daniel's card fills in: 12 calls in 20 days, later and longer, every
    rung of the ladder, and the flagged sentences in the journal.
 2. Add **Sarah, daughter** under *People I've chosen to tell*. Open http://127.0.0.1:5174 in a
    private window and enter her code.
 3. Start the call. Either a real FaceTime call to the Mac, or the rehearsal mode, which plays the
    lines in `demo/romance_call.txt` every six seconds as if heard:
    ```bash
-   python device_watch.py --pretend facetime --caller Daniel --script demo/romance_call.txt
+   pkill -f 'device_watch.py --listen'; python3 device_watch.py --pretend facetime --caller Daniel --script demo/romance_call.txt
    ```
    Alerts only she can see appear as the warning signs land: *"They just asked you for money. You
    don't have to decide on this call."*
 4. Send the $8,500 wire. It scores 100: the live call, the request a minute ago, the three-week
    pattern. Her screen shows the stall; the truth is in the private window; Sarah's page shows the
-   paused payment within a second. Sarah presses **I've seen this — I'm calling her**, and
+   paused payment within a second. Sarah presses **I've seen this — I'm calling Margaret**, and
    Margaret's screen says so.
 5. End the call, click **I've hung up — show me**: the alert offers **Don't send**, with **Send
    anyway** now available.
@@ -211,8 +212,8 @@ outcomes, reported separately for scripted tests, red-team runs and consented pi
 
 ```bash
 playwright install chromium          # once, for the browser checks
-python test_e2e.py                   # needs `spacetime start` running, and ports 8778 and 5175 free
-python test_e2e.py --jev --restarts  # also one Jev check (key in .env), and a database restart under load
+python3 test_e2e.py                   # needs `spacetime start` running, and ports 8778 and 5175 free
+python3 test_e2e.py --jev            # also one Jev check (key in .env); add --restarts for a database restart under load (not while the app is up)
 ```
 
 The suite publishes the module to its own database (`eldershield-test`), starts its own daemon and
