@@ -18,10 +18,18 @@ mkdir -p logs
 
 STDB="${SPACETIME_URL:-http://127.0.0.1:3000}"
 DB="${SPACETIME_DB:-eldershield}"
+CALLER="${ELDERSHIELD_CALLER:-}"   # e.g. ELDERSHIELD_CALLER=Daniel ./start.sh: name every real call this, for a demo
 DAEMON="http://127.0.0.1:${ELDERSHIELD_PORT:-8777}"
 FAMILY_PORT=5174
 MODE="${1:-start}"
 PROBLEMS=0
+# How each process looks to pgrep -f, anchored to the start of its command line, so an editor or a
+# shell that merely mentions these file names is never mistaken for (or killed as) the real thing.
+DAEMON_RE='^([^ ]*/)?[Pp]ython[0-9.]* ([^ ]*/)?server\.py'
+SENSOR_RE='^([^ ]*/)?[Pp]ython[0-9.]* (-u )?([^ ]*/)?device_watch\.py'
+LISTENER_RE='Listen\.app/Contents/MacOS/listen'
+WARNING_RE='^[^ ]*/eldershield-warning'
+VITE_RE="^node .*vite --port $FAMILY_PORT"
 
 say_ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 say_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; PROBLEMS=$((PROBLEMS + 1)); }
@@ -35,9 +43,9 @@ state() { curl -sf -m 5 "$DAEMON/state" 2>/dev/null; }
 json()  { python3 -c "import sys, json; d = json.load(sys.stdin); print($1)" 2>/dev/null; }
 
 if [ "$MODE" = "--stop" ]; then
-  pkill -f "device_watch.py"; pkill -f "Listen.app/Contents/MacOS/listen"; pkill -f "eldershield-warning"
-  pkill -f "python3 server.py"; pkill -f "Python server.py"
-  pkill -f "vite --port $FAMILY_PORT"
+  pkill -f "$SENSOR_RE"; pkill -f "$LISTENER_RE"; pkill -f "$WARNING_RE"
+  pkill -f "$DAEMON_RE"
+  pkill -f "$VITE_RE"
   echo "Stopped the daemon, sensor, listener and family page. SpacetimeDB keeps running (your data is safe);"
   echo "to stop it too: pkill -f spacetimedb-standalone"
   exit 0
@@ -54,7 +62,7 @@ echo "— database"
 if up "$STDB/v1/ping"; then say_ok "SpacetimeDB answering at $STDB"
 elif [ "$MODE" = "--check" ]; then say_bad "SpacetimeDB not running (spacetime start)"
 else
-  nohup spacetime start --listen-addr 127.0.0.1:3000 --non-interactive >logs/spacetime.log 2>&1 &
+  nohup spacetime start --listen-addr 127.0.0.1:3000 --non-interactive >logs/spacetime.log 2>&1 </dev/null &
   wait_for "$STDB/v1/ping" 30 "SpacetimeDB" && say_ok "SpacetimeDB started (logs/spacetime.log)"
 fi
 if up "$STDB/v1/ping"; then
@@ -71,14 +79,14 @@ fi
 
 echo "— daemon"
 if up "$DAEMON/health"; then say_ok "daemon answering at $DAEMON"
-elif pgrep -f "[Pp]ython3? server.py" >/dev/null; then       # started before the database: it waits, then connects
+elif pgrep -f "$DAEMON_RE" >/dev/null; then       # started before the database: it waits, then connects
   wait_for "$DAEMON/health" 25 "the already-running daemon" && say_ok "daemon was waiting for the database; now answering" \
     || { say_bad "a daemon process exists but never answered: ./start.sh --stop, then ./start.sh (logs/server.log)"; }
 elif [ "$MODE" = "--check" ]; then say_bad "daemon not running (python3 server.py)"
 elif lsof -nP -iTCP:"${ELDERSHIELD_PORT:-8777}" -sTCP:LISTEN >/dev/null 2>&1; then
   say_bad "port ${ELDERSHIELD_PORT:-8777} is taken by something that isn't answering: $(lsof -nP -tiTCP:"${ELDERSHIELD_PORT:-8777}" -sTCP:LISTEN | head -1) — ./start.sh --stop, then try again"
 else
-  nohup python3 server.py >logs/server.log 2>&1 &
+  nohup python3 server.py >logs/server.log 2>&1 </dev/null &
   wait_for "$DAEMON/health" 20 "daemon" && say_ok "daemon started (logs/server.log)" || tail -5 logs/server.log
 fi
 if up "$DAEMON/health"; then
@@ -88,32 +96,35 @@ if up "$DAEMON/health"; then
 fi
 
 echo "— sensor (calls, remote control, listening)"
-if pgrep -f "device_watch.py" >/dev/null; then
+if pgrep -f "$SENSOR_RE" >/dev/null; then
   i=0; while [ $i -lt 12 ]; do [ "$(state | json "d['device']['sensor_live']")" = "True" ] && break; sleep 1; i=$((i + 1)); done
   if [ $i -ge 12 ]; then say_bad "sensor process exists but the daemon hasn't heard from it in 12 s: ./start.sh --stop, then ./start.sh (logs/sensor.log)"
-  elif pgrep -f "device_watch.py --listen" >/dev/null; then say_ok "sensor live, listening"
+  elif pgrep -f "$SENSOR_RE.* --listen" >/dev/null; then say_ok "sensor live, listening"
   else say_warn "sensor live but WITHOUT --listen: calls are detected but not heard (./start.sh --stop, then ./start.sh)"; fi
 elif [ "$MODE" = "--check" ]; then say_bad "sensor not running (python3 device_watch.py --listen)"
 else
-  nohup python3 -u device_watch.py --listen >logs/sensor.log 2>&1 &
+  if [ -n "$CALLER" ]; then nohup python3 -u device_watch.py --listen --caller "$CALLER" >logs/sensor.log 2>&1 </dev/null &
+  else nohup python3 -u device_watch.py --listen >logs/sensor.log 2>&1 </dev/null & fi
   i=0; while [ $i -lt 90 ]; do [ "$(state | json "d['device']['sensor_live']")" = "True" ] && break; sleep 1; i=$((i + 1)); done
-  [ $i -lt 90 ] && say_ok "sensor live, listening (logs/sensor.log)" || { say_bad "sensor didn't report in 90 s"; tail -5 logs/sensor.log; }
+  [ $i -lt 90 ] && say_ok "sensor live, listening (logs/sensor.log)${CALLER:+; every call will be shown as $CALLER}" || { say_bad "sensor didn't report in 90 s"; tail -5 logs/sensor.log; }
 fi
-ls "$HOME/Library/Application Support/CallHistoryDB" >/dev/null 2>&1 && say_ok "call history readable: callers get their names" \
-  || say_warn "no Full Disk Access for this terminal: callers show as 'Unknown caller' (System Settings → Privacy & Security → Full Disk Access → add Terminal/VS Code, then ./start.sh --stop && ./start.sh), or rehearse with --caller Daniel"
+if [ -n "$CALLER" ]; then say_ok "caller name pinned to '$CALLER' for this session (ELDERSHIELD_CALLER)"
+elif ls "$HOME/Library/Application Support/CallHistoryDB" >/dev/null 2>&1; then say_ok "call history readable: callers get their names"
+else say_warn "no Full Disk Access for the app this terminal belongs to: real callers show as 'Unknown caller'. Either add that app under System Settings → Privacy & Security → Full Disk Access (quit and reopen it, then ./start.sh --stop && ./start.sh), or pin the name for the demo: ELDERSHIELD_CALLER=Daniel ./start.sh"; fi
 
 echo "— her circle's page"
 if up "http://127.0.0.1:$FAMILY_PORT/"; then say_ok "family page at http://127.0.0.1:$FAMILY_PORT"
 elif [ "$MODE" = "--check" ]; then say_warn "family page not running (cd family && npm run dev)"
 elif [ ! -x family/node_modules/.bin/vite ]; then say_warn "family/node_modules missing: cd family && npm install"
 else
-  (cd family && nohup node_modules/.bin/vite --port $FAMILY_PORT --strictPort --host 127.0.0.1 >../logs/family.log 2>&1 &)
+  # no "( … & )" subshell here: a forked sh would linger as vite's parent, holding this script's stdout open
+  nohup sh -c "cd family && exec node_modules/.bin/vite --port $FAMILY_PORT --strictPort --host 127.0.0.1" >logs/family.log 2>&1 </dev/null &
   wait_for "http://127.0.0.1:$FAMILY_PORT/" 20 "family page" && say_ok "family page started at http://127.0.0.1:$FAMILY_PORT (logs/family.log)"
 fi
 
 if [ "$MODE" != "--quick" ]; then
   echo "— listener self-test (12 s: the Mac speaks a test line; the listener must hear and transcribe it)"
-  if pgrep -f "Listen.app/Contents/MacOS/listen --post" >/dev/null; then say_warn "a call is live right now; skipping the self-test"
+  if pgrep -f "$LISTENER_RE --post" >/dev/null; then say_warn "a call is live right now; skipping the self-test"
   else
     : >logs/listener-selftest.log
     # speak only once the tap is confirmed live (the listener's launch time varies), then give it

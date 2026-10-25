@@ -46,7 +46,14 @@ curl -sSf https://install.spacetimedb.com | sh          # the SpacetimeDB CLI, o
 `start.sh` starts whatever isn't running (database → module → daemon → sensor with `--listen` → family
 page), then proves the listener can hear by speaking a test line through the Mac and showing what it
 transcribed. `./start.sh --check` only checks; `./start.sh --stop` stops the app (the database keeps
-running). The daemon waits up to a minute for the database, so the start order doesn't matter. By hand:
+running); `./drill.sh` breaks each piece and checks `start.sh` recovers it. The daemon waits up to a
+minute for the database, so the start order doesn't matter.
+
+Caller names come from the Mac's call history, which needs **Full Disk Access for the app you start
+from** (System Settings → Privacy & Security → Full Disk Access → Terminal, then quit and reopen
+Terminal): the sensor inherits it from that window, so start from Terminal, not from an editor's
+terminal. `start.sh` says whether names will resolve. A number not in Contacts shows as "Caller ending
+3141". For a rehearsal, `ELDERSHIELD_CALLER=Daniel ./start.sh` names every call Daniel instead. By hand:
 
 ```bash
 spacetime start                                           # terminal 1: the database
