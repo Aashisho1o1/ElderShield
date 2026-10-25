@@ -184,11 +184,11 @@ def classify(text: str) -> list[tuple[str, float, int]]:
     return found
 
 
-def finished_sentences(text: str) -> list[tuple[str, int]]:
+def finished_sentences(text: str, final: bool = False) -> list[tuple[str, int]]:
     """Sentences in a transcript that are complete: (sentence, position). The listener sends a
     growing transcript every ~0.8 s; the sentence being spoken is still changing, so Jev waits
-    for the one before it. Live speech often has no punctuation, so a long run of words is cut
-    into ~12-word pieces instead."""
+    for the one before it, unless the chunk is final, when the last one is finished too. If the
+    recognizer gave no punctuation, a long run of words is cut into ~12-word pieces instead."""
     out, start = [], 0
     for m in re.finditer(r"[.?!]+(\s+|$)", text):
         out.append((text[start:m.end()].strip(), start))
@@ -200,6 +200,8 @@ def finished_sentences(text: str) -> list[tuple[str, int]]:
         out.append((piece, text.find(piece, start)))
         start = text.find(piece, start) + len(piece)
         words = words[12:]
+    if final and words:
+        out.append((" ".join(words), text.find(words[0], start)))
     return [(s, p) for s, p in out if len(s.split()) >= 3]
 
 
@@ -257,7 +259,7 @@ class Store:
         self._lock = Lock()
         self.report: dict[str, Any] = {}
         self.reported_at = 0.0
-        self.alert: Optional[dict[str, Any]] = None   # the latest private alert; the sensor shows each new one
+        self.alerts: list[dict[str, Any]] = []     # recent private alerts, newest first; the sensor shows each
         self._heard: dict[tuple[str, int, str], int] = {}  # (call, chunk, label) -> its signal row
         self._alerted: set[tuple[str, str]] = set()     # (call, label) already alerted
         self._asked_jev: set[tuple[str, str]] = set()   # (call, sentence) Jev has already been asked about
@@ -317,14 +319,14 @@ class Store:
         return dict(row) if row else None
 
     # -- what was heard --------------------------------------------------------
-    def hear(self, chunk: int, text: str) -> list[dict[str, Any]]:
+    def hear(self, chunk: int, text: str, final: bool = False) -> list[dict[str, Any]]:
         """Store the labels the rules hear in this transcript; returns the new ones. Finished
         sentences also go to Jev, whose labels arrive through hear_from_jev() a moment later."""
         call = self.current_call()
         if not call:
             return []
         new = self._record(call, chunk, text, classify(text))
-        for sentence, pos in finished_sentences(text):
+        for sentence, pos in finished_sentences(text, final):
             key = (call["id"], sentence)
             if key in self._asked_jev:
                 continue
@@ -367,14 +369,17 @@ class Store:
     # -- private alerts ------------------------------------------------------
     def push_alert(self, title: str, body: str) -> None:
         with self._lock:
-            self.alert = {"ts": now_ts(), "title": title, "body": body}
+            self.alerts.insert(0, {"ts": now_ts(), "title": title, "body": body})
+            del self.alerts[10:]
 
     def alert_after(self, after: float) -> list[dict[str, Any]]:
-        """Timestamps, not ids, so a daemon restart can't strand the sensor's cursor; and only
-        recent ones, so a sensor that starts late doesn't pop up yesterday's warning."""
+        """Alerts newer than the sensor's cursor, newest first. Timestamps, not ids, so a daemon
+        restart can't strand the cursor; and only recent ones, so a sensor that starts late
+        doesn't pop up yesterday's warning. A list, so two warning signs a second apart (the
+        rule's alert, then Jev's) both reach her."""
+        cutoff = max(after, now_ts() - 30)
         with self._lock:
-            a = self.alert
-        return [a] if a and a["ts"] > after and a["ts"] > now_ts() - 30 else []
+            return [a for a in self.alerts if a["ts"] > cutoff]
 
     # -- payments and releases -----------------------------------------------
     def record_payment(self, action_id: str, fingerprint: str, action_type: str, amount: Optional[float],
@@ -437,7 +442,7 @@ class Store:
             for table in ("contacts", "calls", "signals", "remote_access_seen", "payments", "overrides", "assessments"):
                 self.conn.execute(f"DELETE FROM {table}")
             self.conn.commit()
-            self.alert = None
+            self.alerts.clear()
             self._heard.clear()
             self._alerted.clear()
             self._asked_jev.clear()
@@ -846,6 +851,7 @@ class DeviceReport(BaseModel):
 class TranscriptIn(BaseModel):
     chunk: int = 0                                              # the listener restarts recognition in chunks
     text: str = Field(max_length=5000)
+    final: bool = False                                         # this chunk's text won't change again
 
 
 def fingerprint(a: ActionIn) -> str:
@@ -951,7 +957,7 @@ def raise_live_alert(store: Store, call: dict[str, Any], label: str) -> None:
 def call_transcript(t: TranscriptIn) -> dict[str, Any]:
     """The listener (or the demo script) sends what it hears on the current call. Only the
     labels and, if enabled, the flagged sentence are kept; the rest is dropped here."""
-    heard = STORE.hear(t.chunk, t.text)
+    heard = STORE.hear(t.chunk, t.text, t.final)
     call = STORE.current_call()
     for h in heard:
         if h["alert"] and call:

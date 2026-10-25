@@ -214,7 +214,9 @@ def watch(args, pretend, private_window: bool, listener: bool) -> None:
                     subprocess.run(["pkill", "-f", str(LISTEN_APP / "Contents/MacOS/listen")])
             state["caller"] = caller if state["call_app"] else None
             daemon("/device/context", {**state, "private_window": private_window})
-            for alert in daemon(f"/device/alerts?after={last_alert}"):
+            pending = daemon(f"/device/alerts?after={last_alert}")   # newest first
+            if pending:
+                alert = pending[-1]              # the oldest unseen one; the next tick shows the next
                 last_alert = alert["ts"]
                 if private_window:
                     if window and window.poll() is None:

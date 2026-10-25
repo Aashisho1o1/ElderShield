@@ -8,8 +8,8 @@
 //   Speech is transcribed on this Mac. If the on-device model is missing, it says so and doesn't
 //   transcribe, unless --allow-cloud lets Apple's servers do it.
 //   Listen: started by device_watch.py --listen with --post http://127.0.0.1:8777/calls/transcript;
-//           sends text in ~15 s chunks while the call lasts. The daemon keeps only warning-sign
-//           labels and the flagged sentence.
+//           sends text in chunks that end at a pause in the speech (8–20 s each) while the call
+//           lasts. The daemon keeps only warning-sign labels and the flagged sentence.
 //
 // Permissions it will ask for: System Audio Recording, Speech Recognition.
 import AVFoundation
@@ -95,12 +95,18 @@ func soundingProcesses() -> [String] {
     return names.sorted()
 }
 
-// --- speech: recognition restarts every 15 s, each run is one chunk -----------------------
+// --- speech: recognition restarts in chunks; a chunk ends at a pause in the speech -----------
+// A new recognizer starts at the first ~0.7 s of quiet after 8 s, and after 20 s regardless (the
+// recognizer isn't meant to run for minutes). Cutting at a pause keeps whole sentences in one
+// chunk: a phrase split across two chunks is heard by neither.
 let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
 var request: SFSpeechAudioBufferRecognitionRequest?
 var chunk = 0
+var chunkStarted = Date()
 var transcript = ""            // the latest non-empty text, for the test summary
 var lastPost: [Int: Date] = [:]
+let chunkMinSeconds = 8.0, chunkMaxSeconds = 20.0, pauseSeconds = 0.7
+let speechLevel: Float = 0.01  // RMS above this counts as someone speaking
 
 func send(_ chunk: Int, _ text: String, final: Bool) {
     guard let url = postURL else { return }
@@ -109,7 +115,8 @@ func send(_ chunk: Int, _ text: String, final: Bool) {
     var req = URLRequest(url: url)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    req.httpBody = try? JSONSerialization.data(withJSONObject: ["chunk": chunk, "text": text])
+    // final: this chunk's text won't change again, so the daemon can judge its last sentence too
+    req.httpBody = try? JSONSerialization.data(withJSONObject: ["chunk": chunk, "text": text, "final": final])
     URLSession.shared.dataTask(with: req).resume()
 }
 
@@ -129,9 +136,11 @@ let hints = ["AnyDesk", "TeamViewer", "remote access", "screen share", "install 
 func newChunk() {
     guard let recognizer, transcribing else { return }
     chunk += 1
+    chunkStarted = Date()
     let mine = chunk
     let req = SFSpeechAudioBufferRecognitionRequest()
     req.shouldReportPartialResults = true
+    req.addsPunctuation = true         // the daemon judges finished sentences; without this there are none
     req.contextualStrings = hints
     req.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
     let previous = request
@@ -156,6 +165,7 @@ func newChunk() {
 // --- capture --------------------------------------------------------------------------
 var peak: Float = 0             // loudest moment, for the test result
 var level: Float = 0            // loudest moment in the last second, for the meter
+var lastSpeech = Date()         // when someone was last heard, for cutting chunks at a pause
 var termSource: DispatchSourceSignal?   // global: a local would be released and SIGTERM ignored
 
 func startCapture() {
@@ -198,6 +208,7 @@ func startCapture() {
         let rms = (sum / Float(buf.frameLength)).squareRoot()
         peak = max(peak, rms)
         level = max(level, rms)
+        if rms > speechLevel { lastSpeech = Date() }
         request?.append(buf)
     }, "create IO proc")
     check(AudioDeviceStart(agg, proc), "start capture")
@@ -215,7 +226,11 @@ func startCapture() {
     termSource?.resume()
 
     let started = Date()
-    Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in newChunk() }
+    Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+        let age = Date().timeIntervalSince(chunkStarted)
+        let quiet = Date().timeIntervalSince(lastSpeech)
+        if age >= chunkMaxSeconds || (age >= chunkMinSeconds && quiet >= pauseSeconds) { newChunk() }
+    }
     Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { t in
         let elapsed = Int(Date().timeIntervalSince(started))
         if postURL == nil {
