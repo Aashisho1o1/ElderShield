@@ -48,6 +48,7 @@ import PostFamilyAlertReducer from "./post_family_alert_reducer";
 import RecordPaymentReducer from "./record_payment_reducer";
 import RemoveTrustedPersonReducer from "./remove_trusted_person_reducer";
 import SetCallRemoteAccessReducer from "./set_call_remote_access_reducer";
+import SetElderNameReducer from "./set_elder_name_reducer";
 import SetShareLevelReducer from "./set_share_level_reducer";
 import StartCallReducer from "./start_call_reducer";
 import TakeReleaseReducer from "./take_release_reducer";
@@ -103,6 +104,7 @@ const reducersSchema = __reducers(
   __reducerSchema("record_payment", RecordPaymentReducer),
   __reducerSchema("remove_trusted_person", RemoveTrustedPersonReducer),
   __reducerSchema("set_call_remote_access", SetCallRemoteAccessReducer),
+  __reducerSchema("set_elder_name", SetElderNameReducer),
   __reducerSchema("set_share_level", SetShareLevelReducer),
   __reducerSchema("start_call", StartCallReducer),
   __reducerSchema("take_release", TakeReleaseReducer),

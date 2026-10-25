@@ -251,13 +251,21 @@ export const clearJournal = spacetimedb.reducer(ctx => {
 
 // --- her circle: what she decides ------------------------------------------------------------
 
+/** Called at every daemon start: creates her household the first time, and never touches it again. */
 export const ensureHousehold = spacetimedb.reducer(
   { elder_name: t.string(), now: t.f64() },
   (ctx, { elder_name, now }) => {
     daemonOnly(ctx);
+    if (!theHousehold(ctx)) ctx.db.household.insert({ id: 0n, elder_name, share_level: 'payments', created_at: now });
+  });
+
+/** Her name as her circle sees it: hers to set from her page, and kept across restarts. */
+export const setElderName = spacetimedb.reducer(
+  { elder_name: t.string() },
+  (ctx, { elder_name }) => {
+    daemonOnly(ctx);
     const h = theHousehold(ctx);
-    if (!h) ctx.db.household.insert({ id: 0n, elder_name, share_level: 'payments', created_at: now });
-    else if (h.elder_name !== elder_name) ctx.db.household.id.update({ ...h, elder_name });
+    if (h) ctx.db.household.id.update({ ...h, elder_name });
   });
 
 export const setShareLevel = spacetimedb.reducer(

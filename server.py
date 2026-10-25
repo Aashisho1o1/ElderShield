@@ -491,11 +491,10 @@ class Store(Spacetime):
         with self._lock:
             return [a for a in self.alerts if a["ts"] > cutoff]
 
-    def family(self) -> dict[str, Any]:
-        """Her circle as the page shows it, and whether anyone has answered an alert. The first
-        time someone acknowledges one, she gets a private line saying who is on the way."""
-        h = self.sql("SELECT * FROM household")
-        people = sorted(self.sql("SELECT * FROM trusted_person"), key=lambda p: p["added_at"])
+    def notice_family(self) -> list[dict[str, Any]]:
+        """Recent alerts to her circle, newest first. The first time someone has answered one,
+        she gets a private line saying who is on the way. The assessor calls this every couple of
+        seconds, so the line reaches her window whether or not her page is open."""
         alerts = sorted(self.sql("SELECT * FROM family_alert"), key=lambda a: -a["ts"])[:8]
         for a in alerts:
             if a["acknowledged_by"] and a["id"] not in self._family_seen:
@@ -503,6 +502,18 @@ class Store(Spacetime):
                 if now_ts() - a["acknowledged_at"] < 120:
                     self.push_alert(f"{a['acknowledged_by']} has seen this and is calling you",
                                     "You don't have to decide anything until you've talked to them.")
+        return alerts
+
+    def elder_name(self) -> str:
+        """How her circle knows her: what she set on her page, else the configured default."""
+        h = self.sql("SELECT elder_name FROM household")
+        return h[0]["elder_name"] if h else ELDER_NAME
+
+    def family(self) -> dict[str, Any]:
+        """Her circle as the page shows it."""
+        h = self.sql("SELECT * FROM household")
+        people = sorted(self.sql("SELECT * FROM trusted_person"), key=lambda p: p["added_at"])
+        alerts = self.notice_family()
         return {
             "elder_name": h[0]["elder_name"] if h else ELDER_NAME,
             "share_level": h[0]["share_level"] if h else "payments",
@@ -827,6 +838,7 @@ class Assessor:
             self._wake.wait(ASSESS_EVERY_S)
             self._wake.clear()
             try:
+                self.store.notice_family()                  # "Sarah is calling you", page open or not
                 live = self.store.current_call()
                 if live:
                     self._last_call = live["id"]
@@ -873,7 +885,7 @@ class Assessor:
         if level == "high":
             who = "someone" if contact["label"] == "Unknown caller" else contact["label"]
             family = ("warning", f"A call with {who} looks like {PATTERN_WORDS.get(verdict['pattern'], 'a scam')}",
-                      f"{ELDER_NAME} is on a call right now. Jev judges the pattern of calls with {who} "
+                      f"{self.store.elder_name()} is on a call right now. Jev judges the pattern of calls with {who} "
                       f"{int(verdict['fraud_likely'] * 100)}% likely fraud. ElderShield has warned her; "
                       "nothing has been sent. A call from you would help.")
         self.store.push_alert(title, body, family)
@@ -1024,7 +1036,7 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
         # Her circle hears about a paused payment (if she has let anyone in): what was paused and
         # the first reason, in a sentence; never the account details.
         family = ("payment", f"ElderShield paused a{amount} {a.action_type.replace('_', ' ')}",
-                  f"{ELDER_NAME} was about to send{amount}" + (f" while {s['reasons'][0]}" if s["reasons"] else "")
+                  f"{STORE.elder_name()} was about to send{amount}" + (f" while {s['reasons'][0]}" if s["reasons"] else "")
                   + ". ElderShield paused it and told her privately. Nothing has been sent. A call from you would help.")
         if private_overlay:
             STORE.push_alert(f"Wait — before you send{amount}",
@@ -1077,7 +1089,7 @@ def raise_live_alert(store: Store, call: dict[str, Any], label: str) -> None:
     store.push_alert(f"On this call: {LABEL_WORDS[label]}",
                      LIVE_ALERTS[label] + ("" if who == "Unknown caller" else f"\n\n(The caller: {who}.)"),
                      family=("warning", f"On a call, {'someone' if who == 'Unknown caller' else who} {LABEL_WORDS[label]}",
-                             f"{ELDER_NAME} is on a {call['app']} call right now. ElderShield heard that the caller "
+                             f"{store.elder_name()} is on a {call['app']} call right now. ElderShield heard that the caller "
                              f"{LABEL_WORDS[label]} and has warned her privately. Nothing has been sent."))
 
 
@@ -1108,8 +1120,9 @@ def assess_now() -> dict[str, Any]:
 
 @app.get("/state")
 def state() -> dict[str, Any]:
+    family = STORE.family()          # first: it may add the private line the alert list below carries
     return {"device": STORE.device(), "track": track(STORE), "alert": STORE.alert_after(0),
-            "jev": jev.STATUS.snapshot(), "family": STORE.family()}
+            "jev": jev.STATUS.snapshot(), "family": family}
 
 
 # --- her circle: who she tells, and how much. Hers to change, from her own page only. ---------
@@ -1153,7 +1166,7 @@ def set_share(s: ShareIn) -> dict[str, Any]:
 
 @app.post("/family/name")
 def set_name(n: NameIn) -> dict[str, Any]:
-    STORE.call("ensure_household", n.name.strip(), now_ts())
+    STORE.call("set_elder_name", n.name.strip())
     return STORE.family()
 
 

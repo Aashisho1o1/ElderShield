@@ -393,7 +393,7 @@ function callRow(c){
       ${c.live?'<span class="chip bad">live</span>':''}${c.late?'<span class="chip">late night</span>':''}
       ${c.remote_access.map(r=>`<span class="chip bad">${esc(r)}</span>`).join('')}</div>
     ${c.heard.length?`<div class="chips" style="margin-top:4px">${[...new Map(c.heard.map(h=>[h.words,h])).values()].map(h=>`<span class="chip warn" title="${h.source==='jev'?'heard by Jev, '+Math.round(h.confidence*100)+'% sure':'matched a known phrase'}">${esc(h.words)}${h.source==='jev'?' <small>·jev</small>':''}</span>`).join('')}</div>`:''}
-    ${c.heard.filter(h=>h.snippet).slice(0,2).map(h=>`<div class="snip">“${esc(h.snippet)}”</div>`).join('')}
+    ${[...new Set(c.heard.filter(h=>h.snippet).map(h=>h.snippet))].slice(0,2).map(s=>`<div class="snip">“${esc(s)}”</div>`).join('')}
     ${c.payments.map(p=>`<div class="meta">tried to send $${Number(p.amount||0).toLocaleString()} · ${esc(p.decision)}</div>`).join('')}
   </div>`;
 }

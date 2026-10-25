@@ -19,6 +19,7 @@ const connectionBuilder = DbConnection.builder()
   .withUri(URI)
   .withDatabaseName(DATABASE)
   .withToken(saved)
+  .withAutomaticReconnect({ minDelayMs: 1000, maxDelayMs: 10000 })   // the database may restart; her alerts come back
   .onConnect((_conn, _identity, token) => {
     try { localStorage.setItem(TOKEN_KEY, token); } catch { /* fine */ }
   });
