@@ -363,7 +363,7 @@ try:
         page.wait_for_selector(".person.high")
         page.wait_for_timeout(400)
         text = page.inner_text("aside")
-        page.screenshot(path=str(HERE / "demo_intercept.png"), full_page=True)
+        page.screenshot(path=str(LOGS / "three-week-story.png"), full_page=True)
         ok("browser: the 3-week story shows Daniel's card and the call journal",
            "Daniel" in text and "escalating" in text and "hospital" in text.lower())
 
