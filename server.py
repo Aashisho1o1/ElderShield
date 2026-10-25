@@ -9,10 +9,14 @@ calls and the warning signs heard in them, tracks each caller over weeks (the sl
 a romance or investment scam), and when the senior tries to send money it pauses the payment
 with a plain-language alert if the moment or the history calls for it.
 
-Everything runs and is stored on this computer. The daemon answers only its own page.
+The journal, the payments, Jev's judgments and her circle live in SpacetimeDB (spacetimedb/):
+the module's reducers are the only way to write them, and only this daemon's identity may.
+The people she has chosen to tell subscribe to the module's views and see only what she shares.
 
 Run:
     pip install -r requirements.txt
+    spacetime start                  # the database (or point SPACETIME_URL at Maincloud)
+    spacetime publish eldershield --server local
     python server.py                 # then open http://127.0.0.1:8777
     python device_watch.py           # second terminal
 """
@@ -23,8 +27,9 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,8 +49,11 @@ import jev
 # --------------------------------------------------------------------------- #
 
 HERE = Path(__file__).resolve().parent
-DB_PATH = Path(os.environ.get("ELDERSHIELD_DB", HERE / "eldershield_state.db"))
 INDEX_PATH = HERE / "index.html"
+# The journal lives in SpacetimeDB: `spacetime start` locally, or a Maincloud database.
+SPACETIME_URL = os.environ.get("SPACETIME_URL", "http://127.0.0.1:3000").rstrip("/")
+SPACETIME_DB = os.environ.get("SPACETIME_DB", "eldershield")
+ELDER_NAME = os.environ.get("ELDERSHIELD_NAME", "Margaret")      # how her circle sees her named
 PORT = 8777
 
 # Only the daemon's own page (and an allowlisted extension origin, if configured) may call it.
@@ -224,45 +232,88 @@ def snippet_around(text: str, pos: int) -> str:
 # --------------------------------------------------------------------------- #
 
 
-class Store:
-    def __init__(self, db_path: Path = DB_PATH):
-        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS contacts (id TEXT PRIMARY KEY, label TEXT NOT NULL, first_seen REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS calls (
-                id TEXT PRIMARY KEY, contact_id TEXT NOT NULL, app TEXT NOT NULL,
-                started REAL NOT NULL, ended REAL, remote_access TEXT NOT NULL DEFAULT '[]');
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, call_id TEXT NOT NULL, contact_id TEXT NOT NULL,
-                ts REAL NOT NULL, label TEXT NOT NULL, confidence REAL NOT NULL, snippet TEXT,
-                source TEXT NOT NULL DEFAULT 'rules');
-            CREATE TABLE IF NOT EXISTS remote_access_seen (name TEXT PRIMARY KEY, last_seen REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS payments (
-                action_id TEXT PRIMARY KEY, ts REAL NOT NULL, fingerprint TEXT NOT NULL, action_type TEXT NOT NULL,
-                amount REAL, decision TEXT NOT NULL, score INTEGER NOT NULL, call_id TEXT, released_by TEXT);
-            CREATE TABLE IF NOT EXISTS assessments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, contact_id TEXT NOT NULL, call_id TEXT,
-                fraud_likely REAL NOT NULL, financial_steering REAL NOT NULL, isolation REAL NOT NULL,
-                escalation REAL NOT NULL, pattern TEXT NOT NULL, pattern_confidence REAL NOT NULL,
-                evidence TEXT NOT NULL, model TEXT, ms INTEGER);
-            CREATE INDEX IF NOT EXISTS ix_assess_contact ON assessments(contact_id, ts);
-            CREATE TABLE IF NOT EXISTS overrides (
-                token TEXT PRIMARY KEY, action_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
-                decision TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
-            CREATE INDEX IF NOT EXISTS ix_calls_contact ON calls(contact_id, started);
-            CREATE INDEX IF NOT EXISTS ix_signals_contact ON signals(contact_id, ts);
-        """)
-        if "source" not in [r[1] for r in self.conn.execute("PRAGMA table_info(signals)")]:   # journals from before Jev
-            self.conn.execute("ALTER TABLE signals ADD COLUMN source TEXT NOT NULL DEFAULT 'rules'")
-        self.conn.commit()
+class SpacetimeError(RuntimeError):
+    def __init__(self, status: int, message: str):
+        super().__init__(f"SpacetimeDB {status}: {message}")
+        self.status = status
+
+
+class Spacetime:
+    """The daemon's line to the database: reducer calls to write, SQL to read, both over HTTP
+    as the identity that published the module, the only one the module lets write the journal.
+    The token is the one `spacetime publish` saved (or SPACETIME_TOKEN)."""
+
+    def __init__(self, url: str = SPACETIME_URL, database: str = SPACETIME_DB, token: Optional[str] = None):
+        self.base = f"{url}/v1/database/{database}"
+        self.token = token or os.environ.get("SPACETIME_TOKEN") or self._cli_token()
+        if not self.token:
+            raise SystemExit("No SpacetimeDB token: run `spacetime publish eldershield --server local` once, "
+                             "or set SPACETIME_TOKEN.")
+
+    @staticmethod
+    def _cli_token() -> Optional[str]:
+        try:
+            import tomllib
+            return tomllib.loads((Path.home() / ".config/spacetime/cli.toml").read_text()).get("spacetimedb_token")
+        except (OSError, ValueError):
+            return None
+
+    def _post(self, path: str, body: bytes, content_type: str) -> Any:
+        req = urllib.request.Request(self.base + path, data=body, method="POST", headers={
+            "Authorization": f"Bearer {self.token}", "Content-Type": content_type})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = r.read()
+        except urllib.error.HTTPError as e:
+            raise SpacetimeError(e.code, e.read()[:300].decode(errors="replace")) from None
+        except urllib.error.URLError as e:
+            raise SpacetimeError(0, f"can't reach SpacetimeDB at {self.base}: {e.reason}") from None
+        return json.loads(raw) if raw else None
+
+    def call(self, reducer: str, *args: Any) -> None:
+        """Run a reducer. Raises SpacetimeError(530, reason) when the module refuses."""
+        self._post(f"/call/{reducer}", json.dumps(list(args)).encode(), "application/json")
+
+    def sql(self, query: str) -> list[dict[str, Any]]:
+        """One SELECT, as a list of dicts. SpacetimeDB's SQL has no ORDER BY; callers sort."""
+        result = self._post("/sql", query.encode(), "text/plain")[0]
+        cols = [(e["name"]["some"], e["algebraic_type"]) for e in result["schema"]["elements"]]
+        return [{name: _decode(ty, v) for (name, ty), v in zip(cols, row)} for row in result["rows"]]
+
+
+def _decode(ty: dict[str, Any], v: Any) -> Any:
+    """SATS-JSON to Python: an Option comes as [0, value] / [1, []]."""
+    if "Sum" in ty:
+        names = [x["name"]["some"] for x in ty["Sum"]["variants"]]
+        if names == ["some", "none"]:
+            return v[1] if v[0] == 0 else None
+    return v
+
+
+def lit(v: Any) -> str:
+    """A SQL literal for our own values: ids, labels, timestamps."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(float(v))
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+class Store(Spacetime):
+    """Everything ElderShield remembers, kept in SpacetimeDB; plus what is true right now
+    (the sensor's last report, the private alerts), which lives only in memory."""
+
+    def __init__(self) -> None:
+        super().__init__()
         self._lock = Lock()
         self.report: dict[str, Any] = {}
         self.reported_at = 0.0
         self.alerts: list[dict[str, Any]] = []     # recent private alerts, newest first; the sensor shows each
-        self._heard: dict[tuple[str, int, str], int] = {}  # (call, chunk, label) -> its signal row
+        self._heard: set[str] = set()                   # signal keys already written this run
         self._alerted: set[tuple[str, str]] = set()     # (call, label) already alerted
         self._asked_jev: set[tuple[str, str]] = set()   # (call, sentence) Jev has already been asked about
+        self._family_seen: set[int] = set()             # family alerts whose acknowledgement she has been told of
+        self.call("ensure_household", ELDER_NAME, now_ts())
 
     # -- device and calls ----------------------------------------------------
     def update_device(self, report: dict[str, Any]) -> None:
@@ -270,27 +321,26 @@ class Store:
         with self._lock:
             self.report, self.reported_at = report, now
             for name in report["remote_access"]:
-                self.conn.execute("INSERT OR REPLACE INTO remote_access_seen VALUES (?, ?)", (name, now))
+                self.call("note_remote_access", name, now)
             self._sync_call(report, now)
-            self.conn.commit()
 
     def _sync_call(self, report: dict[str, Any], at: float) -> None:
         """Open a journal entry when a call starts, close it when it ends (lock held)."""
-        open_call = self.conn.execute("SELECT * FROM calls WHERE ended IS NULL").fetchone()
+        open_call = self.current_call()
         if report.get("call_app") and not open_call:
             contact = self._contact(report.get("caller"), at)
-            self.conn.execute("INSERT INTO calls VALUES (?,?,?,?,NULL,?)",
-                              ("call_" + uuid.uuid4().hex[:10], contact, report["call_app"], at,
-                               json.dumps(report["remote_access"])))
+            self.call("start_call", "call_" + uuid.uuid4().hex[:10], contact, report["call_app"], at,
+                      json.dumps(report["remote_access"]))
         elif open_call and not report.get("call_app"):
-            self.conn.execute("UPDATE calls SET ended=? WHERE id=?", (at, open_call["id"]))
+            self.call("end_call", open_call["id"], at)
         elif open_call and report["remote_access"]:
             seen = sorted(set(json.loads(open_call["remote_access"])) | set(report["remote_access"]))
-            self.conn.execute("UPDATE calls SET remote_access=? WHERE id=?", (json.dumps(seen), open_call["id"]))
+            if seen != json.loads(open_call["remote_access"]):
+                self.call("set_call_remote_access", open_call["id"], json.dumps(seen))
 
     def _contact(self, caller: Optional[str], at: float) -> str:
         cid = salted_hash(caller) if caller else "unknown"
-        self.conn.execute("INSERT OR IGNORE INTO contacts VALUES (?,?,?)", (cid, caller or "Unknown caller", at))
+        self.call("upsert_contact", cid, caller or "Unknown caller", at)
         return cid
 
     def device(self) -> dict[str, Any]:
@@ -300,10 +350,8 @@ class Store:
             live = self.report if now - self.reported_at < DEVICE_REPORT_TTL_S else {}
             if not live and self.reported_at:                 # sensor went quiet: end any open call
                 self._sync_call({"call_app": None, "remote_access": []}, self.reported_at)
-                self.conn.commit()
-            seen = [r[0] for r in self.conn.execute(
-                "SELECT name FROM remote_access_seen WHERE last_seen >= ? ORDER BY name",
-                (now - REMOTE_ACCESS_MEMORY_S,))]
+            seen = sorted(r["name"] for r in self.sql(
+                f"SELECT name FROM remote_access_seen WHERE last_seen >= {lit(now - REMOTE_ACCESS_MEMORY_S)}"))
         running = live.get("remote_access", [])
         return {
             "sensor_live": bool(live),
@@ -314,9 +362,64 @@ class Store:
             "private_window": bool(live.get("private_window")),
         }
 
+    # -- reads the track and the scoring need (SpacetimeDB SQL has no ORDER BY: sorted here) --
+    @staticmethod
+    def _call_row(r: dict[str, Any]) -> dict[str, Any]:
+        return {**r, "ended": None if r["live"] else r["ended"]}
+
     def current_call(self) -> Optional[dict[str, Any]]:
-        row = self.conn.execute("SELECT * FROM calls WHERE ended IS NULL").fetchone()
-        return dict(row) if row else None
+        rows = self.sql("SELECT * FROM call_log WHERE live = true")
+        return self._call_row(rows[0]) if rows else None
+
+    def contacts(self) -> list[dict[str, Any]]:
+        return self.sql("SELECT * FROM contact")
+
+    def contact_label(self, contact_id: str) -> str:
+        rows = self.sql(f"SELECT label FROM contact WHERE id = {lit(contact_id)}")
+        return rows[0]["label"] if rows else "Unknown caller"
+
+    def calls_for(self, contact_id: str, since: float) -> list[dict[str, Any]]:
+        rows = self.sql(f"SELECT * FROM call_log WHERE contact_id = {lit(contact_id)} AND started >= {lit(since)}")
+        return sorted((self._call_row(r) for r in rows), key=lambda c: c["started"])
+
+    def recent_calls(self, n: int) -> list[dict[str, Any]]:
+        rows = sorted(self.sql("SELECT * FROM call_log"), key=lambda c: -c["started"])
+        return [self._call_row(r) for r in rows[:n]]
+
+    def count_calls(self, start: float, end: float) -> int:
+        return self.sql(f"SELECT COUNT(*) AS n FROM call_log WHERE started >= {lit(start)} AND started < {lit(end)}")[0]["n"]
+
+    @staticmethod
+    def _signal_row(r: dict[str, Any]) -> dict[str, Any]:
+        return {**r, "snippet": r["snippet"] or None}
+
+    def signals_for(self, contact_id: str, since: float) -> list[dict[str, Any]]:
+        rows = self.sql(f"SELECT * FROM signal WHERE contact_id = {lit(contact_id)} AND ts >= {lit(since)}")
+        return sorted((self._signal_row(r) for r in rows), key=lambda s: s["ts"])
+
+    def signals_for_call(self, call_id: str) -> list[dict[str, Any]]:
+        rows = self.sql(f"SELECT * FROM signal WHERE call_id = {lit(call_id)}")
+        return sorted((self._signal_row(r) for r in rows), key=lambda s: s["ts"])
+
+    def latest_ask(self, since: float) -> Optional[dict[str, Any]]:
+        """The most recent money/gift-card/crypto ask heard on any call since `since`, with who said it."""
+        rows = [s for s in self.sql(f"SELECT * FROM signal WHERE ts >= {lit(since)}") if s["label"] in ASK_LABELS]
+        if not rows:
+            return None
+        ask = max(rows, key=lambda s: s["ts"])
+        return {**ask, "who": self.contact_label(ask["contact_id"])}
+
+    @staticmethod
+    def _payment_row(r: dict[str, Any]) -> dict[str, Any]:
+        return {**r, "amount": None if r["amount"] < 0 else r["amount"],
+                "call_id": r["call_id"] or None, "released_by": r["released_by"] or None}
+
+    def payments_for_call(self, call_id: str) -> list[dict[str, Any]]:
+        return [self._payment_row(r) for r in self.sql(f"SELECT * FROM payment WHERE call_id = {lit(call_id)}")]
+
+    def payments_since(self, ts: float, decision: Optional[str] = None) -> list[dict[str, Any]]:
+        where = f"ts >= {lit(ts)}" + (f" AND decision = {lit(decision)}" if decision else "")
+        return [self._payment_row(r) for r in self.sql(f"SELECT * FROM payment WHERE {where}")]
 
     # -- what was heard --------------------------------------------------------
     def hear(self, chunk: int, text: str, final: bool = False) -> list[dict[str, Any]]:
@@ -350,27 +453,34 @@ class Store:
         new = []
         with self._lock:
             for label, conf, pos in found:
-                key = (call["id"], chunk, label)
-                snippet = snippet_around(text, pos) if KEEP_SNIPPETS else None
+                key = f"{call['id']}:{chunk}:{label}:{source}"
+                snippet = snippet_around(text, pos) if KEEP_SNIPPETS else ""
                 if key in self._heard:          # the same chunk again, usually more of the sentence
                     if source == "rules":
-                        self.conn.execute("UPDATE signals SET snippet=? WHERE id=?", (snippet, self._heard[key]))
+                        self.call("add_signal", key, call["id"], call["contact_id"], now_ts(), label, conf, snippet, source)
                     continue
-                cur = self.conn.execute("INSERT INTO signals (call_id, contact_id, ts, label, confidence, snippet, source) "
-                                        "VALUES (?,?,?,?,?,?,?)",
-                                        (call["id"], call["contact_id"], now_ts(), label, conf, snippet, source))
-                self._heard[key] = cur.lastrowid
-                new.append({"label": label, "confidence": conf, "snippet": snippet, "source": source,
+                self.call("add_signal", key, call["id"], call["contact_id"], now_ts(), label, conf, snippet, source)
+                self._heard.add(key)
+                new.append({"label": label, "confidence": conf, "snippet": snippet or None, "source": source,
                             "alert": (call["id"], label) not in self._alerted and label in LIVE_ALERTS})
                 self._alerted.add((call["id"], label))
-            self.conn.commit()
         return new
 
-    # -- private alerts ------------------------------------------------------
-    def push_alert(self, title: str, body: str) -> None:
-        with self._lock:
-            self.alerts.insert(0, {"ts": now_ts(), "title": title, "body": body})
-            del self.alerts[10:]
+    # -- private alerts, and the circle she has chosen to tell ---------------
+    def push_alert(self, title: str, body: str, family: Optional[tuple[str, str, str]] = None) -> None:
+        """An alert for her private window (none if the title is empty). `family` = (kind, title,
+        body) also tells the people in her circle, in fewer words; the module shows it only to
+        those she has let in, and only the kinds she has chosen to share."""
+        if title:
+            with self._lock:
+                self.alerts.insert(0, {"ts": now_ts(), "title": title, "body": body})
+                del self.alerts[10:]
+        if family:
+            kind, ftitle, fbody = family
+            try:
+                self.call("post_family_alert", kind, ftitle, fbody, now_ts())
+            except SpacetimeError as e:
+                print(f"family alert not posted: {e}")
 
     def alert_after(self, after: float) -> list[dict[str, Any]]:
         """Alerts newer than the sensor's cursor, newest first. Timestamps, not ids, so a daemon
@@ -381,71 +491,85 @@ class Store:
         with self._lock:
             return [a for a in self.alerts if a["ts"] > cutoff]
 
+    def family(self) -> dict[str, Any]:
+        """Her circle as the page shows it, and whether anyone has answered an alert. The first
+        time someone acknowledges one, she gets a private line saying who is on the way."""
+        h = self.sql("SELECT * FROM household")
+        people = sorted(self.sql("SELECT * FROM trusted_person"), key=lambda p: p["added_at"])
+        alerts = sorted(self.sql("SELECT * FROM family_alert"), key=lambda a: -a["ts"])[:8]
+        for a in alerts:
+            if a["acknowledged_by"] and a["id"] not in self._family_seen:
+                self._family_seen.add(a["id"])
+                if now_ts() - a["acknowledged_at"] < 120:
+                    self.push_alert(f"{a['acknowledged_by']} has seen this and is calling you",
+                                    "You don't have to decide anything until you've talked to them.")
+        return {
+            "elder_name": h[0]["elder_name"] if h else ELDER_NAME,
+            "share_level": h[0]["share_level"] if h else "payments",
+            "people": [{"id": p["id"], "name": p["name"], "relation": p["relation"], "code": p["invite_code"],
+                        "joined": p["identity"] is not None} for p in people],
+            "alerts": [{"id": a["id"], "ts": iso(a["ts"]), "kind": a["kind"], "title": a["title"],
+                        "acknowledged_by": a["acknowledged_by"] or None} for a in alerts],
+        }
+
     # -- payments and releases -----------------------------------------------
     def record_payment(self, action_id: str, fingerprint: str, action_type: str, amount: Optional[float],
                        decision: str, score: int, released_by: Optional[str] = None) -> None:
         call = self.current_call()
-        with self._lock:
-            self.conn.execute("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?)",
-                              (action_id, now_ts(), fingerprint, action_type, amount, decision, score,
-                               call["id"] if call else None, released_by))
-            self.conn.commit()
+        self.call("record_payment", action_id, now_ts(), fingerprint, action_type,
+                  -1.0 if amount is None else float(amount), decision, int(score),
+                  call["id"] if call else "", released_by or "")
 
     def payment(self, action_id: str) -> Optional[dict[str, Any]]:
-        row = self.conn.execute("SELECT * FROM payments WHERE action_id=?", (action_id,)).fetchone()
-        return dict(row) if row else None
+        rows = self.sql(f"SELECT * FROM payment WHERE action_id = {lit(action_id)}")
+        return self._payment_row(rows[0]) if rows else None
 
     def add_override(self, token: str, action_id: str, fingerprint: str, decision: str) -> float:
         now = now_ts()
-        with self._lock:
-            self.conn.execute("INSERT INTO overrides VALUES (?,?,?,?,?,?,NULL)",
-                              (token, action_id, fingerprint, decision, now, now + OVERRIDE_WINDOW_S))
-            self.conn.commit()
+        self.call("add_release", token, action_id, fingerprint, decision, now, now + OVERRIDE_WINDOW_S)
         return now + OVERRIDE_WINDOW_S
 
     def take_override(self, token: str, fingerprint: str) -> Optional[dict[str, Any]]:
-        """Single use, bound to one exact payment, and only within its window."""
-        now = now_ts()
-        with self._lock:
-            cur = self.conn.execute(
-                "UPDATE overrides SET used_at=? WHERE token=? AND fingerprint=? AND used_at IS NULL AND expires_at > ?",
-                (now, token, fingerprint, now))
-            self.conn.commit()
-            if not cur.rowcount:
+        """Single use, bound to one exact payment, and only within its window: the module checks
+        and marks it in one transaction, so two clicks can't both get through."""
+        try:
+            self.call("take_release", token, fingerprint, now_ts())
+        except SpacetimeError as e:
+            if e.status == 530:
                 return None
-            return dict(self.conn.execute("SELECT * FROM overrides WHERE token=?", (token,)).fetchone())
+            raise
+        rows = self.sql(f"SELECT * FROM release WHERE token = {lit(token)}")
+        return rows[0] if rows else None
 
     def add_assessment(self, contact_id: str, call_id: Optional[str], verdict: dict[str, Any], evidence: dict[str, Any]) -> None:
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO assessments (ts, contact_id, call_id, fraud_likely, financial_steering, isolation, escalation, "
-                "pattern, pattern_confidence, evidence, model, ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (now_ts(), contact_id, call_id, verdict["fraud_likely"], verdict["financial_steering"], verdict["isolation"],
-                 verdict["escalation"], verdict["pattern"], verdict["pattern_confidence"], json.dumps(evidence),
-                 verdict.get("model"), verdict.get("ms")))
-            self.conn.commit()
+        self.call("add_assessment", now_ts(), contact_id, call_id or "", verdict["fraud_likely"],
+                  verdict["financial_steering"], verdict["isolation"], verdict["escalation"], verdict["pattern"],
+                  verdict["pattern_confidence"], json.dumps(evidence), verdict.get("model") or "", int(verdict.get("ms") or 0))
+
+    def assessments_for(self, contact_id: str) -> list[dict[str, Any]]:
+        """Newest first."""
+        rows = self.sql(f"SELECT * FROM assessment WHERE contact_id = {lit(contact_id)}")
+        return sorted(rows, key=lambda a: -a["ts"])
 
     def latest_assessment(self, contact_id: str) -> Optional[dict[str, Any]]:
-        row = self.conn.execute("SELECT * FROM assessments WHERE contact_id=? ORDER BY ts DESC LIMIT 1", (contact_id,)).fetchone()
-        if not row:
+        rows = self.assessments_for(contact_id)
+        if not rows:
             return None
-        d = dict(row)
+        d = dict(rows[0])
+        d["call_id"] = d["call_id"] or None
         d["evidence"] = json.loads(d["evidence"])
-        prev = self.conn.execute("SELECT fraud_likely FROM assessments WHERE contact_id=? AND ts<? ORDER BY ts DESC LIMIT 1",
-                                 (contact_id, row["ts"])).fetchone()
-        d["previous_fraud_likely"] = prev[0] if prev else None
-        d["ago"] = ago(now_ts() - row["ts"])
+        d["previous_fraud_likely"] = rows[1]["fraud_likely"] if len(rows) > 1 else None
+        d["ago"] = ago(now_ts() - d["ts"])
         return d
 
     def clear(self) -> None:
         with self._lock:
-            for table in ("contacts", "calls", "signals", "remote_access_seen", "payments", "overrides", "assessments"):
-                self.conn.execute(f"DELETE FROM {table}")
-            self.conn.commit()
+            self.call("clear_journal")
             self.alerts.clear()
             self._heard.clear()
             self._alerted.clear()
             self._asked_jev.clear()
+            self._family_seen.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -455,7 +579,7 @@ class Store:
 STAGES = ["", "no warning signs", "love-bombing", "isolating you", "asking for money", "escalating"]
 
 
-def _minutes(call: sqlite3.Row, now: float) -> float:
+def _minutes(call: dict[str, Any], now: float) -> float:
     return ((call["ended"] or now) - call["started"]) / 60
 
 
@@ -464,12 +588,10 @@ def _late(ts: float) -> bool:
     return h >= 22 or h < 6
 
 
-def contact_track(store: Store, contact: sqlite3.Row, now: float) -> dict[str, Any]:
+def contact_track(store: Store, contact: dict[str, Any], now: float) -> dict[str, Any]:
     since = now - HISTORY_DAYS * DAY
-    calls = store.conn.execute("SELECT * FROM calls WHERE contact_id=? AND started>=? ORDER BY started",
-                               (contact["id"], since)).fetchall()
-    sigs = store.conn.execute("SELECT * FROM signals WHERE contact_id=? AND ts>=? ORDER BY ts",
-                              (contact["id"], since)).fetchall()
+    calls = store.calls_for(contact["id"], since)
+    sigs = store.signals_for(contact["id"], since)
     days_known = max(0, int((now - contact["first_seen"]) // DAY))
     week = [c for c in calls if c["started"] >= now - 7 * DAY]
     prev = [c for c in calls if now - 14 * DAY <= c["started"] < now - 7 * DAY]
@@ -477,8 +599,7 @@ def contact_track(store: Store, contact: sqlite3.Row, now: float) -> dict[str, A
     labels = {s["label"] for s in sigs}
     ask_days = {int(s["ts"] // DAY) for s in sigs if s["label"] in ASK_LABELS}
     first_ask = min((s["ts"] for s in sigs if s["label"] in ASK_LABELS), default=None)
-    paid_after_ask = first_ask is not None and store.conn.execute(
-        "SELECT COUNT(*) FROM payments WHERE ts>=?", (first_ask,)).fetchone()[0] > 0
+    paid_after_ask = first_ask is not None and bool(store.payments_since(first_ask))
     love = [s["ts"] for s in sigs if s["label"] == "endearment"]
 
     stage = 1 if calls else 0
@@ -532,28 +653,26 @@ def contact_track(store: Store, contact: sqlite3.Row, now: float) -> dict[str, A
 
 def track(store: Store) -> dict[str, Any]:
     now = now_ts()
-    contacts = [contact_track(store, c, now) for c in store.conn.execute("SELECT * FROM contacts").fetchall()]
+    contacts = [contact_track(store, c, now) for c in store.contacts()]
     contacts = [c for c in contacts if c["calls"]]
     contacts.sort(key=lambda c: (-c["stage"], -c["calls_this_week"]))
     names = {c["id"]: c["name"] for c in contacts}
 
     recent = []
-    for call in store.conn.execute("SELECT * FROM calls ORDER BY started DESC LIMIT 12").fetchall():
-        sigs = store.conn.execute("SELECT label, snippet, source, confidence FROM signals WHERE call_id=? ORDER BY ts",
-                                  (call["id"],)).fetchall()
-        paid = store.conn.execute("SELECT amount, decision FROM payments WHERE call_id=?", (call["id"],)).fetchall()
+    for call in store.recent_calls(12):
+        sigs = store.signals_for_call(call["id"])
+        paid = store.payments_for_call(call["id"])
         recent.append({
             "id": call["id"], "who": names.get(call["contact_id"], "Unknown caller"), "app": call["app"],
             "started": iso(call["started"]), "live": call["ended"] is None, "minutes": round(_minutes(call, now)),
             "late": _late(call["started"]), "remote_access": json.loads(call["remote_access"]),
             "heard": [{"label": s["label"], "words": LABEL_WORDS[s["label"]], "snippet": s["snippet"],
                        "source": s["source"], "confidence": s["confidence"]} for s in sigs],
-            "payments": [dict(p) for p in paid],
+            "payments": [{"amount": p["amount"], "decision": p["decision"]} for p in paid],
         })
 
     # Her own week against her usual, so a change in behaviour shows even before anyone asks.
-    weeks = [store.conn.execute("SELECT COUNT(*) FROM calls WHERE started>=? AND started<?",
-                                (now - (w + 1) * 7 * DAY, now - w * 7 * DAY)).fetchone()[0] for w in range(5)]
+    weeks = [store.count_calls(now - (w + 1) * 7 * DAY, now - w * 7 * DAY) for w in range(5)]
     usual = sum(weeks[1:]) / 4
     you = {"calls_this_week": weeks[0], "usual_calls_per_week": round(usual, 1),
            "change": (f"{weeks[0]} calls this week; usually about {round(usual)}" if usual and weeks[0] >= 2 * usual
@@ -565,16 +684,12 @@ def memory_for_payment(store: Store) -> tuple[dict[str, int], list[str]]:
     """What the journal adds to a payment: a recent ask on a call, and any caller's long pattern."""
     now = now_ts()
     comp, reasons = {}, []
-    ask = store.conn.execute(
-        "SELECT s.ts, s.label, c.label AS who FROM signals s JOIN contacts c ON c.id=s.contact_id "
-        f"WHERE s.ts>=? AND s.label IN ({','.join('?' * len(ASK_LABELS))}) ORDER BY s.ts DESC LIMIT 1",
-        (now - RECENT_ASK_S, *sorted(ASK_LABELS))).fetchone()
+    ask = store.latest_ask(now - RECENT_ASK_S)
     if ask:
         comp["money_asked_on_call"] = WEIGHTS["money_asked_on_call"]
         who = "someone" if ask["who"] == "Unknown caller" else ask["who"]
         reasons.append(f"{who} {LABEL_WORDS[ask['label']]} on a call {ago(now - ask['ts'])}")
-    top = max((contact_track(store, c, now) for c in store.conn.execute("SELECT * FROM contacts").fetchall()),
-              key=lambda t: t["stage"], default=None)
+    top = max((contact_track(store, c, now) for c in store.contacts()), key=lambda t: t["stage"], default=None)
     ladder = 0
     if top and top["stage"] >= 3:
         key = {3: "pattern_isolating", 4: "pattern_asking", 5: "pattern_escalating"}[top["stage"]]
@@ -583,12 +698,12 @@ def memory_for_payment(store: Store) -> tuple[dict[str, int], list[str]]:
                        + {3: "isolating you", 4: "asking you for money", 5: "asking for more and more money"}[top["stage"]])
     # Jev's judgment of the same history (layer 2): it sees the combination the ladder can't.
     # The ladder stays as the floor, so a Jev outage or a low reading never weakens the rules.
-    judged = max((a for a in (store.latest_assessment(c["id"]) for c in store.conn.execute("SELECT id FROM contacts").fetchall())
+    judged = max((a for a in (store.latest_assessment(c["id"]) for c in store.contacts())
                   if a and now - a["ts"] < HISTORY_DAYS * DAY), key=lambda a: a["fraud_likely"], default=None)
     jev_points = int(round(WEIGHTS["pattern_escalating"] * judged["fraud_likely"])) if judged and judged["fraud_likely"] >= 0.5 else 0
     if jev_points:
         comp["long_term_pattern"] = max(ladder, jev_points)   # the ladder is the floor
-        who = store.conn.execute("SELECT label FROM contacts WHERE id=?", (judged["contact_id"],)).fetchone()[0]
+        who = store.contact_label(judged["contact_id"])
         if ladder and top and top["name"] == who:            # Jev agrees with the ladder: one reason, Jev's wording
             reasons.pop()
         reasons.append(f"the pattern of calls with {who} looks like {PATTERN_WORDS.get(judged['pattern'], judged['pattern'])} "
@@ -603,24 +718,21 @@ def memory_for_payment(store: Store) -> tuple[dict[str, int], list[str]]:
 # --------------------------------------------------------------------------- #
 
 
-def evidence_for(store: Store, contact: sqlite3.Row, now: float) -> dict[str, Any]:
+def evidence_for(store: Store, contact: dict[str, Any], now: float) -> dict[str, Any]:
     """What Jev sees: counts, labels and amounts from the journal. Never the words."""
     since = now - HISTORY_DAYS * DAY
-    calls = store.conn.execute("SELECT * FROM calls WHERE contact_id=? AND started>=? ORDER BY started",
-                               (contact["id"], since)).fetchall()
+    calls = store.calls_for(contact["id"], since)
     week = [c for c in calls if c["started"] >= now - 7 * DAY]
     before = [c for c in calls if c["started"] < now - 7 * DAY]
     avg = lambda cs: round(sum(_minutes(c, now) for c in cs) / len(cs)) if cs else 0
-    sigs = store.conn.execute("SELECT call_id, ts, label, snippet FROM signals WHERE contact_id=? AND ts>=? ORDER BY ts",
-                              (contact["id"], since)).fetchall()
+    sigs = store.signals_for(contact["id"], since)
     amounts = []
     for sg in sigs:
         if sg["label"] in ASK_LABELS and sg["snippet"]:
             for m in re.findall(r"\$\s?(\d[\d,]*)|(\d[\d,]*)\s*(?:dollars|bucks)", sg["snippet"]):
                 amounts.append(int((m[0] or m[1]).replace(",", "")))
     first_ask = min((sg["ts"] for sg in sigs if sg["label"] in ASK_LABELS), default=None)
-    paid = [r[0] for r in store.conn.execute("SELECT amount FROM payments WHERE decision='ALLOW' AND ts>=?",
-                                             (first_ask,)).fetchall()] if first_ask else []
+    paid = [p["amount"] for p in store.payments_since(first_ask, "ALLOW")] if first_ask else []
     live = store.current_call()
     by_call: dict[str, list[str]] = {}
     for sg in sigs:
@@ -628,8 +740,7 @@ def evidence_for(store: Store, contact: sqlite3.Row, now: float) -> dict[str, An
     earlier = [{"days_ago": round((now - c["started"]) / DAY, 1), "minutes": round(_minutes(c, now)),
                 "late_night": _late(c["started"]), "heard": by_call.get(c["id"], [])}
                for c in calls if not live or c["id"] != live["id"]][-12:]
-    usual = store.conn.execute("SELECT COUNT(*) FROM calls WHERE started>=? AND started<?",
-                               (now - 35 * DAY, now - 7 * DAY)).fetchone()[0] / 4
+    usual = store.count_calls(now - 35 * DAY, now - 7 * DAY) / 4
     return {
         "listener": "an older adult",
         "caller": {
@@ -721,19 +832,20 @@ class Assessor:
                     self._last_call = live["id"]
                     self.run(live["contact_id"], live["id"])
                 elif self._last_call:                       # the call just ended: one final judgment
-                    ended = self.store.conn.execute("SELECT contact_id FROM calls WHERE id=?", (self._last_call,)).fetchone()
+                    ended = self.store.sql(f"SELECT contact_id FROM call_log WHERE id = {lit(self._last_call)}")
                     self._last_call = None
                     if ended:
-                        self.run(ended["contact_id"], None)
+                        self.run(ended[0]["contact_id"], None)
             except Exception as e:                          # never let the loop die
                 jev.STATUS.last_error = f"assessor: {e}"[:160]
 
     def run(self, contact_id: str, call_id: Optional[str]) -> Optional[dict[str, Any]]:
         if not jev.enabled():
             return None
-        contact = self.store.conn.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
-        if not contact:
+        found = self.store.sql(f"SELECT * FROM contact WHERE id = {lit(contact_id)}")
+        if not found:
             return None
+        contact = found[0]
         evidence = evidence_for(self.store, contact, now_ts())
         verdict = jev.assess(evidence)
         if verdict:
@@ -742,16 +854,14 @@ class Assessor:
                 self._maybe_alert(contact, call_id, verdict, evidence)
         return verdict
 
-    def _maybe_alert(self, contact: sqlite3.Row, call_id: str, verdict: dict[str, Any], evidence: dict[str, Any]) -> None:
+    def _maybe_alert(self, contact: dict[str, Any], call_id: str, verdict: dict[str, Any], evidence: dict[str, Any]) -> None:
         """Alert on a crossing, not a reading: once per call when the judgment reaches 'high'
         (>= 0.7), and once when it reaches 'watch' (>= 0.4 and up 0.2 on the baseline). The
         baseline is the last verdict before this call started, so a caller who already looked
         bad yesterday still gets today's alert, and a refresh at the same level stays silent."""
         p = verdict["fraud_likely"]
-        baseline = self.store.conn.execute(
-            "SELECT fraud_likely FROM assessments WHERE contact_id=? AND (call_id IS NULL OR call_id<>?) "
-            "ORDER BY ts DESC LIMIT 1", (contact["id"], call_id)).fetchone()
-        base = baseline[0] if baseline else 0.0
+        baseline = next((a for a in self.store.assessments_for(contact["id"]) if a["call_id"] != call_id), None)
+        base = baseline["fraud_likely"] if baseline else 0.0
         level = "high" if p >= 0.7 else "watch" if p >= 0.4 and p - base >= 0.2 else None
         if not level or (call_id, level) in self._alerted:
             return
@@ -759,7 +869,14 @@ class Assessor:
             return
         self._alerted.add((call_id, level))
         title, body = verdict_alert(level, verdict, evidence, contact["label"])
-        self.store.push_alert(title, body)
+        family = None
+        if level == "high":
+            who = "someone" if contact["label"] == "Unknown caller" else contact["label"]
+            family = ("warning", f"A call with {who} looks like {PATTERN_WORDS.get(verdict['pattern'], 'a scam')}",
+                      f"{ELDER_NAME} is on a call right now. Jev judges the pattern of calls with {who} "
+                      f"{int(verdict['fraud_likely'] * 100)}% likely fraud. ElderShield has warned her; "
+                      "nothing has been sent. A call from you would help.")
+        self.store.push_alert(title, body, family)
 
 
 PATTERN_WORDS = {"romance": "a romance scam", "impersonation": "a bank or tech-support impersonation scam",
@@ -902,12 +1019,20 @@ def evaluate_action(a: ActionIn) -> dict[str, Any]:
     # payment is being made during a call: a scammer's hold depends on staying on the line.
     locked = paused and (bool(device["remote_access"]) or (s["decision"] == "INTERCEPT" and watching))
 
-    if private_overlay:
+    if paused:
         amount = f" ${a.amount:,.0f}" if a.amount else " this payment"
-        STORE.push_alert(f"Wait — before you send{amount}",
-                         "\n".join(f"• {r[0].upper()}{r[1:]}" for r in s["reasons"])
-                         + "\n\nIt's safe to hang up. The other person only sees a “processing” screen. "
-                         + "When you've hung up, press the button on the bank page.")
+        # Her circle hears about a paused payment (if she has let anyone in): what was paused and
+        # the first reason, in a sentence; never the account details.
+        family = ("payment", f"ElderShield paused a{amount} {a.action_type.replace('_', ' ')}",
+                  f"{ELDER_NAME} was about to send{amount}" + (f" while {s['reasons'][0]}" if s["reasons"] else "")
+                  + ". ElderShield paused it and told her privately. Nothing has been sent. A call from you would help.")
+        if private_overlay:
+            STORE.push_alert(f"Wait — before you send{amount}",
+                             "\n".join(f"• {r[0].upper()}{r[1:]}" for r in s["reasons"])
+                             + "\n\nIt's safe to hang up. The other person only sees a “processing” screen. "
+                             + "When you've hung up, press the button on the bank page.", family)
+        else:
+            STORE.push_alert("", "", family)
     STORE.record_payment(action_id, fp, a.action_type, a.amount, s["decision"], s["score"])
     return {
         "action_id": action_id, "decision": s["decision"], "score": s["score"],
@@ -948,9 +1073,12 @@ def device_alerts(after: float = 0) -> list[dict[str, Any]]:
 
 
 def raise_live_alert(store: Store, call: dict[str, Any], label: str) -> None:
-    who = store.conn.execute("SELECT label FROM contacts WHERE id=?", (call["contact_id"],)).fetchone()[0]
+    who = store.contact_label(call["contact_id"])
     store.push_alert(f"On this call: {LABEL_WORDS[label]}",
-                     LIVE_ALERTS[label] + ("" if who == "Unknown caller" else f"\n\n(The caller: {who}.)"))
+                     LIVE_ALERTS[label] + ("" if who == "Unknown caller" else f"\n\n(The caller: {who}.)"),
+                     family=("warning", f"On a call, {'someone' if who == 'Unknown caller' else who} {LABEL_WORDS[label]}",
+                             f"{ELDER_NAME} is on a {call['app']} call right now. ElderShield heard that the caller "
+                             f"{LABEL_WORDS[label]} and has warned her privately. Nothing has been sent."))
 
 
 @app.post("/calls/transcript")
@@ -972,7 +1100,7 @@ def assess_now() -> dict[str, Any]:
     """Jev judges every known caller against their history right now (the demo's 'Load 3-week
     story' calls this, so the cards fill in without waiting for a call)."""
     out = {}
-    for c in STORE.conn.execute("SELECT id, label FROM contacts").fetchall():
+    for c in STORE.contacts():
         v = ASSESSOR.run(c["id"], None)
         out[c["label"]] = v and {"fraud_likely": v["fraud_likely"], "pattern": v["pattern"]}
     return {"assessed": out, "jev": jev.STATUS.snapshot()}
@@ -980,7 +1108,53 @@ def assess_now() -> dict[str, Any]:
 
 @app.get("/state")
 def state() -> dict[str, Any]:
-    return {"device": STORE.device(), "track": track(STORE), "alert": STORE.alert_after(0), "jev": jev.STATUS.snapshot()}
+    return {"device": STORE.device(), "track": track(STORE), "alert": STORE.alert_after(0),
+            "jev": jev.STATUS.snapshot(), "family": STORE.family()}
+
+
+# --- her circle: who she tells, and how much. Hers to change, from her own page only. ---------
+
+class PersonIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    relation: str = Field("", max_length=40)
+
+
+class PersonId(BaseModel):
+    id: int
+
+
+class ShareIn(BaseModel):
+    level: str = Field(pattern="^(payments|warnings)$")
+
+
+class NameIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+@app.post("/family/people")
+def add_person(p: PersonIn) -> dict[str, Any]:
+    """She adds someone; the code that comes back is what she gives them. Nobody can add themselves."""
+    STORE.call("add_trusted_person", p.name.strip(), p.relation.strip(), now_ts())
+    return STORE.family()
+
+
+@app.post("/family/people/remove")
+def remove_person(p: PersonId) -> dict[str, Any]:
+    """Removing someone also takes every alert out of their view, at once."""
+    STORE.call("remove_trusted_person", p.id)
+    return STORE.family()
+
+
+@app.post("/family/share")
+def set_share(s: ShareIn) -> dict[str, Any]:
+    STORE.call("set_share_level", s.level)
+    return STORE.family()
+
+
+@app.post("/family/name")
+def set_name(n: NameIn) -> dict[str, Any]:
+    STORE.call("ensure_household", n.name.strip(), now_ts())
+    return STORE.family()
 
 
 @app.post("/reset")
@@ -995,7 +1169,7 @@ def demo_seed() -> dict[str, Any]:
     who calls weekly, and one unknown caller."""
     import demo_history
     STORE.clear()
-    demo_history.seed(STORE.conn, salted_hash, now_ts())
+    demo_history.seed(STORE, salted_hash, now_ts())
     return {"ok": True}
 
 

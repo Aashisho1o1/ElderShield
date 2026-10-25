@@ -1,0 +1,31 @@
+:root {
+  --bg: #f6f4ef; --card: #fff; --ink: #1c1b18; --muted: #6b675e; --line: #e4e0d6;
+  --accent: #1f6f5b; --warn: #b4570d; --bad: #b3261e; --fresh: #fff7e6;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #16150f; --card: #211f18; --ink: #f1ede4; --muted: #a39c8d; --line: #35322a; --fresh: #2c2414; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; }
+main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; align-items: center; gap: 8px; font-size: 18px; margin-bottom: 18px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px rgba(31,111,91,.15); }
+.muted { color: var(--muted); }
+.small { font-size: 14px; }
+.who { font-size: 20px; margin: 0 0 4px; }
+.err { color: var(--bad); }
+.empty { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-top: 16px; }
+.alert { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin-top: 14px; }
+.alert.fresh { background: var(--fresh); border-color: var(--warn); }
+.alert .head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; }
+.alert h2 { font-size: 19px; margin: 0 0 6px; line-height: 1.3; }
+.alert p { margin: 0 0 12px; }
+.kind { text-transform: uppercase; letter-spacing: .04em; font-weight: 700; font-size: 12px; color: var(--warn); }
+.kind.payment { color: var(--bad); }
+.ack { color: var(--accent); font-weight: 600; }
+button { font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 10px; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+.join { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; display: grid; gap: 12px; }
+.join h2 { margin: 0; font-size: 20px; }
+.join input { font: inherit; font-size: 26px; letter-spacing: .3em; text-align: center; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); text-transform: uppercase; }
+footer { margin-top: 32px; }

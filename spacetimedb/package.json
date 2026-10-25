@@ -1,0 +1,16 @@
+{
+  "name": "eldershield-module",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ElderShield's journal, decisions and family circle, running inside SpacetimeDB",
+  "scripts": {
+    "build": "spacetime build",
+    "publish": "spacetime publish"
+  },
+  "dependencies": {
+    "spacetimedb": "2.13.*"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.2"
+  }
+}

@@ -1,5 +1,5 @@
 """
-Three weeks of call history for the demo, written straight into the journal.
+Three weeks of call history for the demo, written into the journal through the module's reducers.
 
 "Daniel" is a romance scammer: a wrong-number opener, loving words within days, longer and
 later calls, excuses not to video, "don't tell your daughter", crypto talk, then money asks
@@ -30,35 +30,33 @@ DANIEL = [
 SARAH = [(20, 18, 12), (13, 18, 15), (6, 18, 11)]
 
 
-def seed(conn, salted_hash, now: float) -> None:
+def seed(store, salted_hash, now: float) -> None:
     today = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
     at = lambda days, hour: (today - timedelta(days=days) + timedelta(hours=hour)).timestamp()
 
     def contact(name, first_seen):
         cid = salted_hash(name)
-        conn.execute("INSERT OR IGNORE INTO contacts VALUES (?,?,?)", (cid, name, first_seen))
+        store.call("upsert_contact", cid, name, first_seen)
         return cid
 
     def call(cid, days, hour, minutes, app, heard=()):
         start = at(days, hour)
         call_id = f"call_seed_{cid[:6]}_{days}"
-        conn.execute("INSERT INTO calls VALUES (?,?,?,?,?,?)",
-                     (call_id, cid, app, start, start + minutes * 60, json.dumps([])))
+        store.call("start_call", call_id, cid, app, start, json.dumps([]))
+        store.call("end_call", call_id, start + minutes * 60)
         for i, (label, conf, snippet) in enumerate(heard):
-            conn.execute("INSERT INTO signals (call_id, contact_id, ts, label, confidence, snippet) VALUES (?,?,?,?,?,?)",
-                         (call_id, cid, start + (i + 1) * 120, label, conf, snippet))
+            store.call("add_signal", f"{call_id}:{i}:{label}:rules", call_id, cid, start + (i + 1) * 120,
+                       label, conf, snippet, "rules")
         return call_id
 
     daniel = contact("Daniel", at(21, 15))
     for days, hour, minutes, app, heard in DANIEL:
         call(daniel, days, hour, minutes, app, heard)
         if days == 5:   # she sent the first $1,200 the next morning
-            conn.execute("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?)",
-                         ("act_seed_customs", at(4, 10), "seed", "wire_transfer", 1200, "ALLOW", 0, None, None))
+            store.call("record_payment", "act_seed_customs", at(4, 10), "seed", "wire_transfer", 1200.0,
+                       "ALLOW", 0, "", "")
     sarah = contact("Sarah (daughter)", at(60, 18))
     for days, hour, minutes in SARAH:
         call(sarah, days, hour, minutes, "FaceTime")
-    unknown = "unknown"
-    conn.execute("INSERT OR IGNORE INTO contacts VALUES (?,?,?)", (unknown, "Unknown caller", at(10, 11)))
-    call(unknown, 10, 11, 2, "FaceTime")
-    conn.commit()
+    store.call("upsert_contact", "unknown", "Unknown caller", at(10, 11))
+    call("unknown", 10, 11, 2, "FaceTime")

@@ -21,17 +21,36 @@ It runs on her Mac and does three things:
    While someone may be watching her screen, the alert appears in a window screen sharing can't
    see, and the shared screen shows only a "Verifying…" stall.
 
-Everything is stored and decided on this computer. The decision is fixed code, so nothing a
-scammer says can talk it into anything.
+4. **Tells the people she has chosen**, and no one else. She adds a daughter or a neighbour on her
+   own page, hands them a six-letter code, and picks how much they hear: paused payments only, or
+   warnings heard on calls too. Their page updates the same second ElderShield pauses a payment,
+   and one press ("I've seen this, I'm calling her") shows up on her screen as *Sarah is calling
+   you*. She can take anyone out of her circle at any time, and their page goes quiet at once.
+
+The decision is fixed code, so nothing a scammer says can talk it into anything. The memory, the
+decisions and her circle live in a [SpacetimeDB](https://spacetimedb.com) module
+(`spacetimedb/src/index.ts`): its reducers are the only way to write them, only the daemon's own
+identity may, and the family page is served by the module's views, which hand each person exactly
+the rows she has allowed them. Run the database on her Mac (`spacetime start`) or on Maincloud so
+her circle can reach it.
 
 ## Run (macOS)
 
 ```bash
 pip install -r requirements.txt
-python server.py                    # then open http://127.0.0.1:8777
-python device_watch.py              # second terminal: calls and remote control
-python device_watch.py --listen     # …and listen to calls for warning signs (opt-in)
+curl -sSf https://install.spacetimedb.com | sh          # the SpacetimeDB CLI, once
+spacetime start                                           # terminal 1: the database
+spacetime publish eldershield --server local              # once, and after editing the module
+python server.py                                          # terminal 2: then open http://127.0.0.1:8777
+python device_watch.py                                    # terminal 3: calls and remote control
+python device_watch.py --listen                           # …and listen to calls for warning signs (opt-in)
+cd family && npm install && npm run dev                   # terminal 4: her circle's page, http://127.0.0.1:5174
 ```
+
+`spacetime publish` logs the CLI in to the local server and saves the token the daemon then uses
+(`~/.config/spacetime/cli.toml`; or set `SPACETIME_TOKEN`). `SPACETIME_URL` and `SPACETIME_DB`
+point the daemon at another server, such as Maincloud; `ELDERSHIELD_NAME` is how her circle sees
+her named (default "Margaret").
 
 `device_watch.py` without `--listen` needs no macOS permissions: it reads the process list and
 whether the microphone is in use. With `--listen`, macOS asks once for System Audio Recording and
@@ -100,6 +119,29 @@ alert no longer depends on a phrase match: Jev also reads through speech-to-text
 give cards", "by coin", "any desk"), where the phrase rules caught 6 of 11 garbled test lines and
 Jev 11 of 11.
 
+## Her circle: who she tells, and how much
+
+The usual "family dashboard" watches the older adult. This one is hers. On her page, under
+*People I've chosen to tell*, she adds a person by name and gets a six-letter code to give them;
+the code binds to the first identity that uses it and works for no one else. Nobody can add
+themselves, and nothing is shared until she adds someone. She chooses what they hear:
+
+- **paused payments only** (the default): the moments that matter, in one sentence each, with the
+  first reason and never the account details;
+- **paused payments and warnings on calls**: also "On a call, Daniel asked for money".
+
+Never the calls themselves, never the journal, never her bank. Each person's page (`family/`) is a
+React app on the SpacetimeDB client SDK; it subscribes to three views (`my_memberships`,
+`my_households`, `my_alerts`) that the module computes per identity, so the filtering happens in
+the database, not in the page. When she removes someone, their rows leave their subscription in the
+same transaction. A family member presses **I've seen this, I'm calling her**; the reducer checks
+they are in her circle, records their name, and her page shows *Sarah is calling you* within two
+seconds, with a private line telling her she doesn't have to decide anything until they've talked.
+
+Try it: on her page add "Sarah, daughter", open http://127.0.0.1:5174 in a private window, enter
+the code, then send the $8,500 wire. Sarah's page shows the paused payment the same second; press
+the button, and her page says Sarah is calling.
+
 ## The alert, and "Send anyway"
 
 | Score | Result |
@@ -117,7 +159,10 @@ gift cards or crypto asked on a call in the last day +35; a caller's long-term p
 
 ## Privacy, and consent
 
-- Everything stays in `eldershield_state.db` on this computer; **Reset** wipes it.
+- The journal lives in the SpacetimeDB database you point the daemon at: on this computer with
+  `spacetime start`, or Maincloud when her circle needs to reach it. Its tables are private; only
+  the daemon's identity can write them, and family members see nothing but the views she allows.
+  **Reset** wipes the journal; her circle stays, because that is her decision, not data.
 - The listener keeps no audio and no transcript: the daemon stores the warning-sign label and the
   sentence it was heard in (`ELDERSHIELD_SNIPPETS=0` keeps labels only), with long numbers removed.
 - Listening is opt-in (`--listen`). Recording or monitoring calls needs everyone's consent in
@@ -139,6 +184,9 @@ the unlock and the memory panel.
 
 ## Files
 
+- `spacetimedb/src/index.ts`: the SpacetimeDB module: the journal's tables, the reducers that are the
+  only way to write them, her circle, and the per-person views the family page subscribes to
+- `family/`: her circle's page (React + SpacetimeDB client SDK; bindings in `src/module_bindings`)
 - `server.py`: the daemon: device state, call journal, the long-term track, scoring, the page's API
 - `device_watch.py`: macOS sensor: calls, caller, remote control; starts the listener; shows alerts
 - `macos/Listen.swift`: hears the call and transcribes it on-device (built on first use)
@@ -147,5 +195,6 @@ the unlock and the memory panel.
 - `demo_history.py`, `demo/romance_call.txt`: the three-week story and the live call for the demo
 - `test_e2e.py`: the suite above
 
-The earlier email version (Gmail extension, inbox watcher, multi-panel simulator) is on the
+The SQLite version of the journal, before SpacetimeDB and her circle, is on the `sqlite-backup`
+branch. The earlier email version (Gmail extension, inbox watcher, multi-panel simulator) is on the
 `main-before-oct24-afternoon` branch.

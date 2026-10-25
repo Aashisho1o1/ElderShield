@@ -1,0 +1,24 @@
+{
+  "name": "eldershield-family",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "The page for the people she has chosen to tell: her alerts, live, and one button to say you're calling",
+  "scripts": {
+    "dev": "vite --port 5174",
+    "build": "vite build",
+    "preview": "vite preview --port 5174"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "spacetimedb": "2.13.*"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.6.2",
+    "vite": "^5.4.11"
+  }
+}

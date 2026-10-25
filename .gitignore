@@ -17,3 +17,9 @@ macos/listen.log
 
 # API keys live here, never in git
 .env
+
+# SpacetimeDB module
+spacetimedb/node_modules/
+spacetimedb/dist/
+family/node_modules/
+family/dist/

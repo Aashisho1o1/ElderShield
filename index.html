@@ -107,6 +107,13 @@
   .high .bar-row b{background:var(--bad)}
   .bar-row span:last-child{text-align:right}
   .hint{font-size:12px;color:var(--label);margin:20px 0 0;border-top:1px solid var(--line);padding-top:12px}
+  .circle-form{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-top:8px;align-items:center}
+  .circle-form input{height:30px;font-size:13px}
+  .trusted{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+  .trusted:last-child{border-bottom:0}
+  .trusted .code{font:13px/1 var(--mono);letter-spacing:.15em;border:1px dashed var(--line);border-radius:6px;padding:4px 7px}
+  .trusted .sp{flex:1}
+  .ackline{font-size:12px;color:var(--good);margin-top:6px}
 
   /* What a screen-sharing caller sees: a plain, believable stall */
   #decoy{position:fixed;inset:0;background:rgba(7,7,9,.95);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
@@ -176,6 +183,16 @@
       <div id="people"><span class="muted">No calls yet</span></div>
       <div class="sec">Recent calls</div>
       <div id="calls"><span class="muted">No calls yet</span></div>
+      <!-- Her circle: the people she has chosen to tell. She adds them, she hands them the code,
+           she decides how much they hear, and she can remove anyone. Nobody can add themselves. -->
+      <div class="sec">People I've chosen to tell</div>
+      <div id="circle"><span class="muted">Loading…</span></div>
+      <form id="circleForm" class="circle-form" onsubmit="addPerson(event)">
+        <input id="circleName" placeholder="Name" maxlength="60" required />
+        <input id="circleRelation" placeholder="daughter, son, neighbour…" maxlength="40" />
+        <button type="submit" class="btn-ghost btn-sm">Add</button>
+      </form>
+      <div class="meta" id="circleShare"></div>
       <p class="hint">Run <code>python device_watch.py</code> next to the server. To rehearse:
         <code>--pretend facetime --caller Daniel --script demo/romance_call.txt</code></p>
     </div>
@@ -404,9 +421,38 @@ async function refresh(){
   document.getElementById('you').innerHTML = t.you.change ? `<div class="you">Her week: ${esc(t.you.change)}</div>` : '';
   document.getElementById('people').innerHTML = t.contacts.length ? t.contacts.map(personCard).join('') : '<span class="muted">No calls yet</span>';
   document.getElementById('calls').innerHTML = t.recent_calls.length ? t.recent_calls.slice(0,6).map(callRow).join('') : '<span class="muted">No calls yet</span>';
+  showCircle(s.family);
   const a=s.alert[0];
   if(a && a.ts>lastAlertTs){ lastAlertTs=a.ts; if(!d.private_window && !a.title.startsWith('Wait')) showLive(a); }
 }
+/* Her circle. Everything here is her decision: who, how much, and for how long. */
+function showCircle(f){
+  if(!f) return;
+  const people=f.people.map(p=>`<div class="trusted">
+      <b>${esc(p.name)}</b><span class="muted">${esc(p.relation||'')}</span>
+      ${p.joined?'<span class="chip good">joined</span>':`<span class="code" title="Give them this code; it works once">${esc(p.code)}</span><span class="muted">waiting</span>`}
+      <span class="sp"></span><button class="link" onclick="removePerson(${p.id})">remove</button>
+    </div>`).join('');
+  const acks=f.alerts.filter(a=>a.acknowledged_by).slice(0,2)
+    .map(a=>`<div class="ackline">✓ ${esc(a.acknowledged_by)} saw “${esc(a.title)}” and is calling you</div>`).join('');
+  document.getElementById('circle').innerHTML = (people || '<span class="muted">Nobody yet. Add someone you trust; only you can.</span>') + acks;
+  document.getElementById('circleShare').innerHTML = f.people.length
+    ? `They hear about <select onchange="setShare(this.value)">
+         <option value="payments" ${f.share_level==='payments'?'selected':''}>paused payments only</option>
+         <option value="warnings" ${f.share_level==='warnings'?'selected':''}>paused payments and warnings on calls</option>
+       </select> · never your calls or your bank.`
+    : '';
+}
+async function addPerson(ev){
+  ev.preventDefault();
+  const name=document.getElementById('circleName'), rel=document.getElementById('circleRelation');
+  if(!name.value.trim()) return;
+  showCircle(await post('/family/people',{name:name.value, relation:rel.value}));
+  name.value=''; rel.value='';
+}
+async function removePerson(id){ showCircle(await post('/family/people/remove',{id})); }
+async function setShare(level){ showCircle(await post('/family/share',{level})); }
+
 async function loadStory(){ await post('/demo/seed',{}); refresh(); await post('/assess',{}); refresh(); }
 async function resetAll(){ await post('/reset',{}); location.reload(); }
 
